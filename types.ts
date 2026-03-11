@@ -1,53 +1,100 @@
 
+// ============================================
+// NovaClaw Type System v2
+// Single-Agent AI Assistant Architecture
+// ============================================
 
 export enum AppID {
-  Launcher = 'launcher',
-  Settings = 'settings',
-  Character = 'character',
-  Chat = 'chat',
-  Gallery = 'gallery',
-  Music = 'music',
-  Browser = 'browser',
-  ThemeMaker = 'thememaker',
-  Appearance = 'appearance',
-  Date = 'date',
-  User = 'user',
-  Journal = 'journal',
-  Schedule = 'schedule', // New App
+    Launcher = 'launcher',
+    Settings = 'settings',
+    Chat = 'chat',
+    CheckPhone = 'checkphone',  // Phone-in-Phone: Agent's virtual phone
+    Gallery = 'gallery',
+    ThemeMaker = 'thememaker',
+    Appearance = 'appearance',
+    Date = 'date',              // Future: Voice/Video Call entry
+    User = 'user',              // Lightweight profile card (avatar + nickname)
+    Journal = 'journal',
+    Schedule = 'schedule',
+    Study = 'study',            // Study Room from SULLYTEST2
+    FreeRoam = 'freeroam',      // XHS Free Roam from SULLYTEST2
+    Music = 'music',            // Future: Listen together
+    Browser = 'browser',        // Future: AI search/browse
 }
 
-export type MessageType = 'text' | 'transfer' | 'interaction' | 'voice' | 'emoji' | 'image';
+// --- Message Types ---
+
+export type MessageType = 'text' | 'transfer' | 'interaction' | 'voice' | 'emoji' | 'image' | 'video' | 'xhs_card' | 'file';
+
+export interface MessageReplyRef {
+    id: number;
+    content: string;
+    name: string;
+    messageType?: MessageType;
+    fileName?: string;
+    workspacePath?: string;
+}
 
 export interface Message {
     id: number;
-    charId: string;
+    charId: string;             // Always 'nova' in NovaClaw
     role: 'user' | 'assistant' | 'system';
     type: MessageType;
     content: string;
-    metadata?: any; 
+    metadata?: any;
+    replyTo?: MessageReplyRef;
     timestamp: number;
 }
 
 export interface AppConfig {
-  id: AppID;
-  name: string;
-  icon: string;
-  color: string;
+    id: AppID | string;
+    name: string;
+    icon: string;
+    color: string;
 }
+
+// --- OS Theme ---
 
 export interface OSTheme {
-  hue: number;
-  saturation: number;
-  lightness: number; 
-  wallpaper: string;
-  darkMode: boolean;
-  contentColor: string; // New: Custom color for status bar and widgets
+    hue: number;
+    saturation: number;
+    lightness: number;
+    wallpaper: string;
+    darkMode: boolean;
+    contentColor: string;
 }
 
+// --- API Config ---
+
 export interface APIConfig {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    nativeWorkspacePath?: string; // e.g. 'D:\\MyWork\\Mydevelop\\MyBot'
+    galleryWorkspacePath?: string; // e.g. 'D:\\MyWork\\Mydevelop\\MyBot\\Photos'
+    securityPolicy?: SecurityPolicy;
+    perceptionConfig?: PerceptionConfig;
+    videoUnderstanding?: VideoUnderstandingConfig;
+    ttsProvider?: 'minimax' | 'fish_speech' | 'none';
+    minimaxApiKey?: string;
+    minimaxGroupId?: string;
+    fishSpeechBaseUrl?: string;
+    fishSpeechApiKey?: string;
+}
+
+export interface VideoUnderstandingConfig {
+    maxFrames?: number; // default 10
+    providerMode?: 'auto' | 'kimi' | 'volcengine' | 'gemini';
+    nativeFirst?: boolean;
+}
+
+export interface PerceptionConfig {
+    visibilityThreshold: number;      // 0.0 - 1.0, higher means more strict (silent)
+    internalizationBias: number;      // 0.0 - 1.0, higher means subtle tone influence
+    frequencyPenalty: number;         // 0.0 - 1.0, prevents repeating environmental hints
+    presencePenalty: number;          // 0.0 - 1.0, discourages mentioning already-discussed context
+    batteryUrgencyThreshold: number;  // default 15%
+    lateNightHour: number;            // default 23 (11 PM)
 }
 
 export interface ApiPreset {
@@ -56,26 +103,73 @@ export interface ApiPreset {
     config: APIConfig;
 }
 
-export interface VirtualTime {
-  hours: number;
-  minutes: number;
-  day: string;
-}
+// --- Memory System ---
 
 export interface MemoryFragment {
-  id: string;
-  date: string;
-  summary: string;
-  mood?: string;
+    id: string;
+    date: string;
+    summary: string;
+    mood?: string;
 }
 
-export interface SpriteConfig {
-    scale: number;
-    x: number; // percentage -100 to 100
-    y: number; // percentage -100 to 100
+// --- Memory L3: Dynamic Layer (auto-updated daily) ---
+
+export interface DynamicMemory {
+    id: string;
+    category: 'current_state' | 'purpose_context' | 'on_the_horizon' | 'others';
+    content: string;
+    createdAt: number;
+    updatedAt: number;
 }
 
-// New: User Impression Structure v2.0
+// --- Memory L3: Core Proposals (need user approval) ---
+
+export interface CoreProposal {
+    id: string;
+    category: 'about_nova' | 'user_profile' | 'relationship_core';
+    proposal: string;
+    reason: string;
+    status: 'pending' | 'approved' | 'rejected';
+    createdAt: number;
+}
+
+// --- Cron Job System (OpenClaw-style) ---
+
+export type CronScheduleKind = 'every' | 'at' | 'cron';
+export type CronEveryUnit = 'minutes' | 'hours';
+
+export interface CronJob {
+    id: string;
+    name: string;
+    description?: string;
+    enabled: boolean;
+    type: 'system' | 'custom';              // system = memory fold, custom = user/agent created
+    scheduleKind: CronScheduleKind;
+    // For 'every': everyAmount + everyUnit (e.g. every 30 minutes)
+    everyAmount?: number;
+    everyUnit?: CronEveryUnit;
+    // For 'at': scheduleAt is ISO string for one-shot (e.g. '2026-03-04T07:00')
+    scheduleAt?: string;
+    // For 'cron': cronExpr (e.g. '0 7 * * *')
+    cronExpr?: string;
+    prompt: string;                          // Hidden prompt sent to LLM when triggered
+    lastRunAt?: number;
+    nextRunAt?: number;
+    createdAt: number;
+}
+
+// --- Heartbeat Config ---
+
+export interface HeartbeatConfig {
+    enabled: boolean;
+    intervalMinutes: number;                 // Default 30, user/agent can change
+    lastBeatAt?: number;
+    prompt: string;                          // Hidden system prompt for heartbeat check
+}
+
+// --- User Impression (Four-Dimensional Profile) ---
+// AI-generated psychological portrait of the user
+
 export interface UserImpression {
     version: number;
     lastUpdated?: number;
@@ -105,61 +199,102 @@ export interface UserImpression {
     observed_changes?: string[];
 }
 
-export interface CharacterProfile {
-  id: string;
-  name: string;
-  avatar: string;
-  description: string;
-  systemPrompt: string;
-  worldview?: string; // New: Global worldview/lore settings
-  memories: MemoryFragment[];
-  refinedMemories?: Record<string, string>; 
-  activeMemoryMonths?: string[]; 
-  
-  // New: Internal impression of the user
-  impression?: UserImpression;
+// --- Agent Profile (Single Agent - Nova) ---
 
-  bubbleStyle?: string;
-  chatBackground?: string; 
-  contextLimit?: number;   
-  
-  dateBackground?: string;
-  sprites?: Record<string, string>; 
-  spriteConfig?: SpriteConfig; 
+export interface SpriteConfig {
+    scale: number;
+    x: number;   // percentage -100 to 100
+    y: number;   // percentage -100 to 100
 }
 
-// Data structure for exporting/sharing characters
-export interface CharacterExportData extends Omit<CharacterProfile, 'id' | 'memories' | 'refinedMemories' | 'activeMemoryMonths' | 'impression'> {
+export interface AgentProfile {
+    id: string;                             // Always 'nova'
+    name: string;                           // Real name (e.g. "Nova")
+    nickname?: string;                      // Display nickname in chat (like QQ/Discord)
+    avatar: string;                         // Real/default avatar
+    displayAvatar?: string;                 // Chat display avatar (e.g. couple avatar)
+    description: string;
+    systemPrompt: string;
+    memories: MemoryFragment[];
+    refinedMemories?: Record<string, string>;
+    activeMemoryMonths?: string[];
+    dynamicMemories?: DynamicMemory[];      // L3a dynamic layer
+    coreProposals?: CoreProposal[];         // L3b core proposals awaiting approval
+    impression?: UserImpression;            // AI's psychological profile of user
+    heartbeat?: HeartbeatConfig;            // Heartbeat configuration
+    bubbleStyle?: string;                   // Theme linked to this agent
+    chatBackground?: string;                // Custom chat background
+    contextLimit?: number;
+    replySplitInterval?: number;            // ms between split messages (default: dynamic)
+    hideSystemLogs?: boolean;
+    hideBeforeMessageId?: number;
+    xhsEnabled?: boolean;
+
+    // TTS & Voice
+    chatVoiceEnabled?: boolean;             // Double-layer control switch
+    chatVoiceLang?: string;                 // Target language for voice replies
+    voiceProfile?: {
+        voiceId: string;                    // Fish Speech reference ID or MiniMax voice ID
+        model?: string;
+        speed?: number;
+        vol?: number;
+        pitch?: number;
+        emotion?: string;
+        timberWeights?: { voice_id: string; weight: number }[];
+        voiceModify?: { pitch?: number; intensity?: number; timbre?: number; sound_effects?: string };
+    };
+
+    // DateApp / Visual Novel assets (preserved for future video call)
+    dateBackground?: string;
+    sprites?: Record<string, string>;
+    spriteConfig?: SpriteConfig;
+}
+
+// Legacy alias — for gradual migration
+export type CharacterProfile = AgentProfile;
+
+// --- Agent Config Export ---
+
+export interface AgentExportData extends Omit<AgentProfile, 'id' | 'memories' | 'refinedMemories' | 'activeMemoryMonths' | 'impression'> {
     version: number;
-    type: 'sully_character_card';
-    embeddedTheme?: ChatTheme; // Include custom theme data if used
+    type: 'novaclaw_agent_card';
+    embeddedTheme?: ChatTheme;
 }
+
+// Legacy alias
+export type CharacterExportData = AgentExportData;
+
+// --- User Profile ---
 
 export interface UserProfile {
-    name: string;
-    avatar: string;
-    bio: string; 
+    name: string;                           // Real name (used in Agent prompt context)
+    nickname?: string;                      // Display nickname in chat (like QQ/Discord)
+    avatar: string;                         // Default avatar
+    displayAvatar?: string;                 // Chat display avatar (e.g. couple avatar)
+    bio: string;                            // Sent to AI as user context
 }
+
+// --- Chat Theme & Bubble Style ---
 
 export interface BubbleStyle {
     textColor: string;
     backgroundColor: string;
     backgroundImage?: string;
-    backgroundImageOpacity?: number; // 0-1, independent of container opacity
-    borderRadius: number; 
-    opacity: number; // Container opacity
-    
-    // Bubble Sticker
-    decoration?: string; 
-    decorationX?: number; // %
-    decorationY?: number; // %
-    decorationScale?: number; // 0.5 - 2.0
-    decorationRotate?: number; // deg
+    backgroundImageOpacity?: number;
+    borderRadius: number;
+    opacity: number;
+
+    // Bubble Sticker / Decoration
+    decoration?: string;
+    decorationX?: number;
+    decorationY?: number;
+    decorationScale?: number;
+    decorationRotate?: number;
 
     // Avatar Decoration (Frame/Sticker)
     avatarDecoration?: string;
-    avatarDecorationX?: number; // % relative to avatar center
-    avatarDecorationY?: number; // % relative to avatar center
+    avatarDecorationX?: number;
+    avatarDecorationY?: number;
     avatarDecorationScale?: number;
     avatarDecorationRotate?: number;
 }
@@ -170,8 +305,10 @@ export interface ChatTheme {
     type: 'preset' | 'custom';
     user: BubbleStyle;
     ai: BubbleStyle;
-    customCss?: string; // New: Raw CSS for advanced customization
+    customCss?: string;
 }
+
+// --- Toast ---
 
 export interface Toast {
     id: string;
@@ -179,48 +316,68 @@ export interface Toast {
     type: 'success' | 'error' | 'info';
 }
 
+// --- Gallery ---
+
 export interface GalleryImage {
     id: string;
-    charId: string; 
-    url: string; 
+    charId: string;             // Always 'nova'
+    url: string;
     timestamp: number;
-    review?: string; 
+    review?: string;
     reviewTimestamp?: number;
 }
 
-// Diary Types
+export interface ImageDetail {
+    id: string;
+    fileName: string;
+    detail: string;
+    source: 'user' | 'agent';
+    relatedPath?: string;
+    updatedAt: number;
+}
+
+export interface RelationEvent {
+    id: string;
+    type: 'user_nickname_changed' | 'agent_nickname_changed' | 'user_avatar_changed' | 'agent_avatar_changed' | 'couple_avatar_set' | 'agent_gallery_upload' | 'agent_gallery_send' | 'agent_file_send' | 'agent_voice_send';
+    actor: 'user' | 'agent' | 'system';
+    summary: string;
+    payload?: Record<string, any>;
+    timestamp: number;
+}
+
+// --- Diary / Journal ---
+
 export interface StickerData {
     id: string;
-    url: string; // Emoji or Image URL
-    x: number; // Percentage 0-100
-    y: number; // Percentage 0-100
-    rotation: number; // Degrees
+    url: string;
+    x: number;
+    y: number;
+    rotation: number;
 }
 
 export interface DiaryPage {
     text: string;
-    paperStyle: string; // ID of the paper background
+    paperStyle: string;
     stickers: StickerData[];
 }
 
 export interface DiaryEntry {
     id: string;
-    charId: string;
-    date: string; // YYYY-MM-DD
+    charId: string;             // Always 'nova'
+    date: string;               // YYYY-MM-DD
     userPage: DiaryPage;
-    charPage?: DiaryPage; // Optional until AI replies
+    charPage?: DiaryPage;
     timestamp: number;
     isArchived: boolean;
 }
 
-// --- Schedule App Types ---
+// --- Schedule App ---
 
 export interface Task {
     id: string;
     title: string;
-    supervisorId: string; // Character ID
-    tone: 'gentle' | 'strict' | 'tsundere'; // Interaction style
-    deadline?: string; // YYYY-MM-DD
+    tone: 'gentle' | 'strict' | 'tsundere';
+    deadline?: string;          // YYYY-MM-DD
     isCompleted: boolean;
     completedAt?: number;
     createdAt: number;
@@ -229,28 +386,43 @@ export interface Task {
 export interface Anniversary {
     id: string;
     title: string;
-    date: string; // YYYY-MM-DD
-    charId: string;
-    aiThought?: string; // Cache the generated thought
+    date: string;               // YYYY-MM-DD
+    aiThought?: string;
     lastThoughtGeneratedAt?: number;
 }
+
+// --- Security Policy ---
+
+export interface SecurityPolicy {
+    allowReadWorkspace: boolean;
+    allowWriteWorkspace: boolean;
+    allowReadExternal: boolean;
+    allowNativeAPIs: boolean;     // Camera, Mic, etc.
+    notifyOnSensitive: boolean;
+    allowGlobalFileAccess?: boolean; // Enable PC global file access bypass (ReAct Explorer)
+}
+
+// --- Full Backup ---
 
 export interface FullBackupData {
     timestamp: number;
     version: number;
     theme?: OSTheme;
     apiConfig?: APIConfig;
-    apiPresets?: ApiPreset[]; 
+    apiPresets?: ApiPreset[];
     availableModels?: string[];
-    customIcons?: Record<string, string>; 
-    characters?: CharacterProfile[];
+    customIcons?: Record<string, string>;
+    agentProfile?: AgentProfile;
     messages?: Message[];
     customThemes?: ChatTheme[];
-    savedEmojis?: {name: string, url: string}[];
-    assets?: { id: string, data: string }[]; 
+    savedEmojis?: { name: string, url: string }[];
     galleryImages?: GalleryImage[];
+    imageDetails?: ImageDetail[];
+    relationEvents?: RelationEvent[];
     userProfile?: UserProfile;
-    diaries?: DiaryEntry[]; 
-    tasks?: Task[]; // Added
-    anniversaries?: Anniversary[]; // Added
+    diaries?: DiaryEntry[];
+    tasks?: Task[];
+    anniversaries?: Anniversary[];
+    securityPolicy?: SecurityPolicy;
+    cronJobs?: CronJob[];
 }

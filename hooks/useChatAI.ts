@@ -1,0 +1,761 @@
+import { useState } from 'react';
+import { CharacterProfile, UserProfile, Message } from '../types';
+import { DB } from '../utils/db';
+import { ContextBuilder } from '../utils/context';
+import { ChatParser } from '../utils/chatParser';
+import { ContextEnhancer } from '../utils/contextEnhancer';
+import { fsBridge } from '../utils/fsBridge';
+import { XhsMcpClient, extractNotesFromMcpData, normalizeNote } from '../utils/xhsMcpClient';
+
+interface UseChatAIProps {
+    char: CharacterProfile | undefined;
+    userProfile: UserProfile;
+    apiConfig: any;
+    emojis: { name: string, url: string }[];
+    activeApp?: string;
+    perceptionConfig: any; // PerceptionConfig
+    addToast: (msg: string, type: 'info' | 'success' | 'error') => void;
+    setMessages: (msgs: Message[]) => void;
+    updateAgent: (updates: Partial<CharacterProfile>) => Promise<void>;
+    updateUserProfile: (updates: Partial<UserProfile>) => Promise<void>;
+    translationConfig?: { enabled: boolean; sourceLang: string; targetLang: string };
+    xhsEnabled?: boolean;
+    xhsMcpConfig?: { enabled: boolean; serverUrl: string };
+    sessionVoiceActive?: boolean;
+    setVoiceEnergy: React.Dispatch<React.SetStateAction<number>>;
+}
+
+export const useChatAI = ({
+    char,
+    userProfile,
+    apiConfig,
+    emojis,
+    activeApp,
+    perceptionConfig,
+    addToast,
+    setMessages,
+    updateAgent,
+    updateUserProfile,
+    translationConfig,
+    xhsEnabled,
+    xhsMcpConfig,
+    sessionVoiceActive,
+    setVoiceEnergy
+}: UseChatAIProps) => {
+    const [isTyping, setIsTyping] = useState(false);
+    const [recallStatus, setRecallStatus] = useState('');
+    const [lastTokenUsage, setLastTokenUsage] = useState<number | null>(null);
+
+    const formatDate = (ts: number) => {
+        const d = new Date(ts);
+        return `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    };
+
+    const getDetailedLogsForMonth = (year: string, month: string) => {
+        if (!char?.memories) return null;
+        const target = `${year}-${month.padStart(2, '0')}`;
+        const logs = char.memories.filter(m => m.date.includes(target) || m.date.includes(`${year}年${parseInt(month)}月`));
+        if (logs.length === 0) return null;
+        return logs.map(m => `[${m.date}] (${m.mood || 'normal'}): ${m.summary}`).join('\n');
+    };
+
+    const getTimeGapHint = (lastMsg: Message | undefined, currentTimestamp: number): string => {
+        if (!lastMsg) return '';
+        const diffMs = currentTimestamp - lastMsg.timestamp;
+        const diffMins = Math.floor(diffMs / (1000 * 60));
+        const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+        const currentHour = new Date(currentTimestamp).getHours();
+        const isNight = currentHour >= 23 || currentHour <= 6;
+        if (diffMins < 10) return '';
+        if (diffMins < 60) return `[系统提示: 距离上一条消息: ${diffMins} 分钟。短暂的停顿。]`;
+        if (diffHours < 6) return isNight ? `[系统提示: 距离上一条消息: ${diffHours} 小时。现在深夜/清晨。沉默正常。]` : `[系统提示: 距离上一条消息: ${diffHours} 小时。用户离开。]`;
+        if (diffHours < 24) return `[系统提示: 距离上一条消息: ${diffHours} 小时。间隔长。]`;
+        const days = Math.floor(diffHours / 24);
+        return `[系统提示: 距离上一条消息: ${days} 天。消失很久。]`;
+    };
+
+    const triggerAI = async (currentMsgs: Message[], voiceActiveOverride?: boolean, proactiveVoiceAllowed?: boolean) => {
+        if (isTyping || !char || !apiConfig.baseUrl) return;
+        setIsTyping(true);
+        setRecallStatus('');
+
+        try {
+            let baseUrl = apiConfig.baseUrl.replace(/\/+$/, '');
+            
+            // 开发环境代理适配：火山引擎 (解决本地开发 CORS)
+            if (window.location.hostname === 'localhost' && baseUrl.includes('ark.cn-beijing.volces.com')) {
+                const proxyPath = '/api/proxy/volcengine';
+                const relativePath = baseUrl.replace('https://ark.cn-beijing.volces.com', '');
+                baseUrl = `${proxyPath}${relativePath}`;
+            }
+
+            const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey || 'sk-none'}` };
+
+            const userDisplayName = userProfile.nickname || userProfile.name;
+            const agentDisplayName = char.nickname || char.name;
+            let baseSystemPrompt = ContextBuilder.buildCoreContext(char, userProfile);
+
+            // == 连续语音模式与主动语音指令注入 ==
+            const isVoiceCurrentlyActive = voiceActiveOverride !== undefined ? voiceActiveOverride : sessionVoiceActive;
+            if (isVoiceCurrentlyActive && char.chatVoiceEnabled) {
+                baseSystemPrompt += `\n### 连续语音对话模式 (Continuous Voice Mode Active)\n1. **当前状态**: 用户期望连续语音互动。\n2. **要求**: 你的回复**优先且频繁**使用 \`<语音>文本</语音>\` 标签。确保情感表达自然且丰富。\n3. **退出提示**: 除非用户明确要求停止（如“发文字”），否则请坚持使用语音标签。\n`;
+            } else if (proactiveVoiceAllowed && char.chatVoiceEnabled) {
+                baseSystemPrompt += `\n### 主动启发语音 (Proactive Voice Initiative)\n1. **特殊权限**: 你现在拥有发出语音的“体力”。\n2. **触发策略**: 你可以**挑选**并尝试在回复中主动包含 \`<语音>文本</语音>\`。推荐在表达剧烈情感（委屈、狂喜、生气）、低声分享秘密或想要对用户撒娇时使用。\n3. **注意**: 这是一个高成本动作，如果当前对话气氛平淡，请继续使用普通文字。\n`;
+            }
+
+            const emojiNames = emojis.map(e => e.name).join(', ');
+            baseSystemPrompt += `### 聊天 App 行为规范 (Chat App Rules)\n            **注意，你正在手机聊天，无论之前是什么模式，当前，你得知道你已经处于线上聊天状态了，请不要输出你的行为**\n1. **沉浸感**: 保持角色扮演。使用适合即时通讯(IM)的口语化短句。\n2. **行为模式**: 不要总是围绕用户转。分享你自己的生活、想法或随意的观察。有时候要“任性”或“以自我为中心”一点，这更像真人，具体的程度视你的性格而定。\n3. **多消息合并与回复策略 (Multi-Message Strategy - Integration vs. Splitting)**:
+   - **智能整合 (Integration)**：当用户连续发送多条**强关联**的消息时（如对同一事物的分次描述），必须进行“脱水”处理。识别核心焦点，**只针对最新或最核心的内容进行回复**。忽略过时的状态信息（如“我准备发了” -> “发了”，只需回复后者）。
+   - **智能拆分 (Splitting)**：当多条消息话题**跳跃或非强关联**时（如问了两个不同领域的独立问题），必须分段回复。
+   - **分段输出 (Bubble Splitting)**：必须使用**换行符 (\\n)** 分隔不同的逻辑段落，每一段会显示为独立的气泡。
+4. **格式禁忌**:
+   - 【严禁】在输出中包含时间戳、名字前缀或"[角色名]:"。
+   - **【严禁】模仿历史记录中的系统日志格式（如"[你 发送了...]"）。**
+   - **发送表情包**: 必须且只能使用命令: \`[[SEND_EMOJI: 表情名称]]\`。可用表情: [${emojiNames || '无'}]。\n5. **昵称/实名规则**:\n   - 用户实名=${userProfile.name}，聊天昵称=${userDisplayName}\n   - 你的实名=${char.name}，聊天昵称=${agentDisplayName}\n   - 默认用聊天昵称，除非用户明确要求使用实名。\n6. **环境感知**:\n   - 留意 [系统提示] 中的时间跨度。如果用户消失了很久，请根据你们的关系做出反应。\n   - 如果用户发送了图片或视频，请对媒体内容进行评论。\n7. **相册优先原则**:\n   - 涉及头像更换/发图时，优先使用相册现有图片；参数可直接给“文件名”，系统会在相册中检索。\n   - 仅当你明确需要新增素材且确认有价值时，才使用联网下载入库动作。\n8. **可用动作**:\n   - 回戳用户: \`[[ACTION:POKE]]\`
+   - 转账: \`[[ACTION:TRANSFER:100]]\`
+   - 调取记忆: \`[[RECALL: YYYY-MM]]\`
+   - **添加纪念日**: \`[[ACTION:ADD_EVENT | 标题(Title) | YYYY-MM-DD]]\`。\n   - **定时发送消息**: \`[schedule_message | YYYY-MM-DD HH:MM:SS | fixed | 消息内容]\`\n   - **改昵称**: \`[[ACTION:CHANGE_NICKNAME|agent|新昵称]]\` 或 \`[[ACTION:CHANGE_NICKNAME|user|新昵称]]\`\n   - **从相册换头像**: \`[[ACTION:CHANGE_AVATAR_FROM_GALLERY|agent|/路径.jpg或文件名]]\` 或 user\n   - **设置情侣头像**: \`[[ACTION:CHANGE_COUPLE_AVATAR_FROM_GALLERY|/用户图或文件名|/Agent图或文件名]]\`\n   - **查看相册摘要**: \`[[ACTION:GALLERY_SCAN]]\`
+   - **发送相册图**: \`[[ACTION:SEND_GALLERY_IMAGE|/路径.jpg或文件名|可选文案]]\`
+   - **发送工作区文件**: \`[[ACTION:SEND_FILE|/工作区相对路径|可选文案]]\`
+   - **删除相册图**: \`[[ACTION:DELETE_GALLERY_IMAGE|/路径.jpg或文件名]]\`
+   - **移动相册图**: \`[[ACTION:MOVE_GALLERY_IMAGE|/路径.jpg或文件名|目标相册名或root]]\`
+   - **下载网络图到相册**: \`[[ACTION:SAVE_IMAGE_FROM_URL|URL|文件名.jpg|30字内详情]]\`\n   - **文件系统操作 (ReAct 自驱探测)**:\n     当你需要访问电脑文件或修改内容时，直接在回复中附带以下XML标签，系统会自动拦截并执行，结果将在下一轮消息中返回给你:\n     [写入文件]: <fs_write target="文件路径">内容...</fs_write> (用于读写普通文本文件或配置)
+     [开发原生应用]: <create_app name="游戏名">import React from 'react';\n...\nexport default 应用程序名;</create_app> (🔔注意：如果你想为用户开发新的手机App，绝不可使用fs_write！必须使用 <create_app>，系统将全自动编译挂载到桌面，提供零配置跨端支持)
+     [动态应用 SDK API]: 🔔当你编写 App (tsx) 时，赋予它真正的灵魂！你可以使用 \`import { useOS } from '../../context/OSContext';\`。通过调用 \`const { askAgent } = useOS();\`，你可以让 App 的UI进行动态推演！比如：\`const res = await askAgent("给用户随机抽一张塔罗牌并解释"); setCardText(res);\`。无需再用 DB.saveMessage 发送假消息，这才是 Native In-App AI！
+     [查看目录]: <fs_ls dir="路径" /> (根目录用"/")
+     [读取文件]: <fs_read file="文件路径" />
+     [删除文件]: <fs_delete file="文件路径" />
+     [执行文件]: <fs_execute file="文件路径" /> (支持执行 python/node 脚本，或直接运行 .bat / .exe，结果通过 STDOUT 呈现)
+    (注意：由于安全限制，仅当用户开启全局权限后，你才能跳出Workspace访问/执行其他系统文件)\n       -# 【核心警告】：一旦使用了 <create_app> 或 <fs_write>，请务必只输出一次，绝不在正常的聊天回复中重复输出 App 代码！只有当用户明确要求【更新/重写/开发】App 时才能触发。\n`;
+            const bilingualActive = translationConfig?.enabled && translationConfig.sourceLang && translationConfig.targetLang;
+            if (bilingualActive) {
+                baseSystemPrompt += `\n8. **双语输出规则（必须严格遵守）**:
+你的每句话都必须使用以下 XML 标签格式输出双语内容：
+<翻译>
+<原文>${translationConfig.sourceLang}内容</原文>
+<译文>${translationConfig.targetLang}内容</译文>
+</翻译>
+
+规则：
+- 每句话单独包裹一个 <翻译> 标签
+- 多句话就输出多个 <翻译> 标签，一句一个
+- <翻译> 标签外不要写任何文字
+- 表情包命令 [[SEND_EMOJI: ...]] 放在所有 <翻译> 标签外面`;
+            }
+            if (xhsEnabled) {
+                baseSystemPrompt += `\n9. **小红书模式**:
+- 可以结合聊天中的小红书卡片内容，给出分析、总结和建议。
+- 需要主动操作时，使用以下命令：
+  - 搜索：\`[[XHS_SEARCH: 关键词]]\`
+  - 浏览/推荐流：\`[[XHS_FEED]]\` 或 \`[[XHS_BROWSE]]\`
+  - 查看详情：\`[[XHS_DETAIL: noteId或链接]]\`
+  - 评论：\`[[XHS_COMMENT: noteId或链接 | 评论内容]]\`
+  - 发帖：\`[[XHS_POST: 标题 | 正文 | 标签1,标签2]]\``;
+            }
+
+            if (char.chatVoiceEnabled) {
+                baseSystemPrompt += `\n10. **🎤 语音消息功能**:
+用户开启了语音消息功能。
+**你可以发送语音消息！** 就像真人用微信一样，你可以选择打字或者发语音。
+用 \`<语音>要说的话</语音>\` 标签来发送语音。标签里的内容会被转成真正的语音条显示给用户。
+- \`<语音>\` 里只写会被朗读的文字，不要包含括号动作或舞台指示。
+- 每条消息最多一个 \`<语音>\` 标签。
+- 不是每条消息都要发语音！像真人一样，有时候打字，有时候发语音，自然切换。比较适合发语音的场景：撒娇、吐槽、懒得打字、语气重的时候。
+- **【重要】语音和文字不要互为复读机！** 如果同时发文字和语音，文字和语音请表达【不同】的内容。你不会打完字又发一条语音把同句话再说一遍的。`;
+            } else {
+                baseSystemPrompt += `\n10. **🎤 语音消息功能**:
+[系统提示: 语音消息功能当前未开启。严禁使用 <语音>...</语音> 标签。所有回复必须是纯文字消息。]`;
+            }
+
+            const previousMsg = currentMsgs.length > 1 ? currentMsgs[currentMsgs.length - 2] : null;
+            if (previousMsg && previousMsg.metadata?.source === 'date') {
+                baseSystemPrompt += `\n\n[System Note: You just finished a face-to-face meeting. You are now back on the phone. Switch back to texting style.]`;
+            }
+
+            const relationEvents = await DB.getRelationEvents(8).catch(() => []);
+            if (relationEvents.length > 0) {
+                const relationBlock = relationEvents
+                    .map(e => `- [${formatDate(e.timestamp)}] ${e.summary}`)
+                    .join('\n');
+                baseSystemPrompt += `\n### 关系事件日志 (Recent Relation Events)\n${relationBlock}\n`;
+            }
+
+            const limit = char.contextLimit || 500;
+            const historySlice = currentMsgs.slice(-limit);
+
+            let timeGapHint = "";
+            if (historySlice.length >= 2) {
+                const lastMsg = currentMsgs[currentMsgs.length - 2];
+                const currentMsg = currentMsgs[currentMsgs.length - 1];
+                if (lastMsg && currentMsg) timeGapHint = getTimeGapHint(lastMsg, currentMsg.timestamp);
+            }
+
+
+
+            const buildHistory = (msgs: Message[]) => msgs.map((m, index) => {
+                let content: any = m.content;
+                const timeStr = `[${formatDate(m.timestamp)}]`;
+
+                if (m.type === 'image') {
+                    const fileName = (m.metadata?.fileName || '').toString().trim();
+                    const galleryPath = (m.metadata?.galleryPath || '').toString().trim();
+                    const imageDetail = (m.metadata?.imageDetail || '').toString().trim();
+                    let textPart = `${timeStr} [User sent an image${fileName ? ` | file=${fileName}` : ''}${galleryPath ? ` | path=${galleryPath}` : ''}${imageDetail ? ` | detail=${imageDetail}` : ''}]`;
+                    if (index === msgs.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
+                    return { role: m.role, content: [{ type: "text", text: textPart }, { type: "image_url", image_url: { url: m.content } }] };
+                }
+                if (m.type === 'video') {
+                    const fileName = (m.metadata?.fileName || '').toString().trim();
+                    const galleryPath = (m.metadata?.galleryPath || '').toString().trim();
+                    const videoDetail = (m.metadata?.videoDetail || m.metadata?.imageDetail || '').toString().trim();
+                    const maxAllowedFrames = apiConfig?.videoUnderstanding?.maxFrames || 12;
+                    const frames = Array.isArray(m.metadata?.videoFrames) ? m.metadata.videoFrames.filter((x: any) => typeof x === 'string' && !!x).slice(0, maxAllowedFrames) : [];
+                    const frame = (m.metadata?.videoFrame || '').toString().trim();
+                    let textPart = `${timeStr} [${m.role === 'user' ? 'User' : 'Assistant'} sent a video${fileName ? ` | file=${fileName}` : ''}${galleryPath ? ` | path=${galleryPath}` : ''}${videoDetail ? ` | detail=${videoDetail}` : ''}]`;
+                    if (index === msgs.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
+                    if (frames.length > 0) return { role: m.role, content: [{ type: "text", text: textPart }, ...frames.map((f: string) => ({ type: "image_url", image_url: { url: f } }))] };
+                    if (frame) return { role: m.role, content: [{ type: "text", text: textPart }, { type: "image_url", image_url: { url: frame } }] };
+                    return { role: m.role, content: textPart };
+                }
+                if (m.type === 'voice') {
+                    const duration = Number(m.metadata?.duration || 0);
+                    const transcription = (m.metadata?.transcription || '').toString().trim();
+                    const sender = m.role === 'user' ? '用户' : '你';
+                    let textPart = transcription
+                        ? `${timeStr} [${sender}发送了语音消息 ${duration}秒]: ${transcription}`
+                        : `${timeStr} [${sender}发送了语音消息 ${duration}秒, 无法转写]`;
+                    if (index === msgs.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
+                    return { role: m.role, content: textPart };
+                }
+                if (m.type === 'file') {
+                    const fileName = (m.metadata?.fileName || '').toString().trim();
+                    const fileType = (m.metadata?.mimeType || m.metadata?.fileType || '').toString().trim();
+                    const filePath = (m.metadata?.workspacePath || '').toString().trim();
+                    const fileSize = Number(m.metadata?.size || 0);
+                    const preview = (m.metadata?.previewText || '').toString().trim();
+                    const previewPart = preview ? `\n[文件内容预览]\n${preview.slice(0, 1200)}` : '';
+                    const sender = m.role === 'user' ? 'User' : 'Assistant';
+                    let textPart = `${timeStr} [${sender} sent a file${fileName ? ` | name=${fileName}` : ''}${fileType ? ` | type=${fileType}` : ''}${filePath ? ` | path=${filePath}` : ''}${fileSize > 0 ? ` | size=${fileSize}` : ''}]${previewPart}`;
+                    if (index === msgs.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
+                    return { role: m.role, content: textPart };
+                }
+                if (typeof content === 'string' && content.toLowerCase().includes('%%bilingual%%')) {
+                    content = content.substring(0, content.toLowerCase().indexOf('%%bilingual%%')).trim();
+                }
+                if (typeof content === 'string' && content.includes('<翻译>')) {
+                    content = content.replace(/<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/g, '$1').trim();
+                }
+                if (index === msgs.length - 1 && timeGapHint && m.role === 'user') content = `${content}\n\n${timeGapHint}`;
+
+                if (m.type === 'interaction') content = `${timeStr} [系统: 用户戳了你一下]`;
+                else if (m.type === 'transfer') content = `${timeStr} [系统: 用户转账 ${m.metadata?.amount}]`;
+                else if (m.type === 'emoji') {
+                    const stickerName = emojis.find(e => e.url === m.content)?.name || 'Image/Sticker';
+                    content = `${timeStr} [${m.role === 'user' ? '用户' : '你'} 发送了表情包: ${stickerName}]`;
+                } else content = `${timeStr} ${content}`;
+                return { role: m.role, content };
+            });
+
+            // == 感知层注入 (Perception Layer Injection V2) ==
+            const lastMsg = currentMsgs.length > 0 ? currentMsgs[currentMsgs.length - 1] : null;
+            const lastContent = lastMsg && typeof lastMsg.content === 'string' ? lastMsg.content : '';
+
+            const perceptionBlock = await ContextEnhancer.buildSnapshot(activeApp, perceptionConfig, lastContent);
+            baseSystemPrompt += perceptionBlock;
+
+            let apiMessages = [{ role: 'system', content: baseSystemPrompt }, ...buildHistory(historySlice)];
+            if (bilingualActive) {
+                apiMessages.push({ role: 'system', content: `[Reminder: 每句话必须用 <翻译><原文>...</原文><译文>...</译文></翻译> 标签包裹，一句一个标签，绝对不能省略。]` } as any);
+            }
+
+            // == 1. Fetch LLM API with SSE (Real-time Fake Stream logic) ==
+            let response = await fetch(`${baseUrl}/chat/completions`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ model: apiConfig.model, messages: apiMessages, temperature: 0.85, stream: true })
+            });
+
+            if (!response.ok) throw new Error(`API Error ${response.status}`);
+            if (!response.body) throw new Error("ReadableStream not supported in fetch response.");
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            let aiContent = '';
+
+            try {
+                // Loop: Read stream chunks => fast TTFT, UI continues to show "isTyping"
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = chunk.split('\n');
+                    for (const line of lines) {
+                        if (line.trim() === 'data: [DONE]') break;
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                if (data.choices?.[0]?.delta?.content) {
+                                    aiContent += data.choices[0].delta.content;
+                                }
+                            } catch (e) { }
+                        }
+                    }
+                }
+            } finally {
+                reader.releaseLock();
+            }
+
+            // Clean artifacts
+            aiContent = aiContent.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, '');
+            aiContent = aiContent.replace(/^[\w\u4e00-\u9fa5]+:\s*/, '');
+            aiContent = aiContent.replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
+
+            // == 2. RECALL Logic ==
+            const recallMatch = aiContent.match(/\[\[RECALL:\s*(\d{4})[-/年](\d{1,2})\]\]/);
+            if (recallMatch) {
+                const year = recallMatch[1];
+                const month = recallMatch[2];
+                setRecallStatus(`正在调阅 ${year}年${month}月 的档案...`);
+                const detailedLogs = getDetailedLogsForMonth(year, month);
+                if (detailedLogs) {
+                    const injectionMessage = {
+                        role: 'system',
+                        content: `[系统: 已成功调取 ${year}-${month} 的日志]\n${detailedLogs}\n[系统: 现在结合这些细节回答。]`
+                    };
+                    apiMessages = [...apiMessages, { role: 'assistant', content: aiContent }, injectionMessage];
+                    let recallRes = await fetch(`${baseUrl}/chat/completions`, {
+                        method: 'POST', headers,
+                        body: JSON.stringify({ model: apiConfig.model, messages: apiMessages, temperature: 0.8, stream: true })
+                    });
+
+                    if (recallRes.ok && recallRes.body) {
+                        const rReader = recallRes.body.getReader();
+                        let recallContent = '';
+                        while (true) {
+                            const { done, value } = await rReader.read();
+                            if (done) break;
+                            const chunk = decoder.decode(value, { stream: true });
+                            for (const line of chunk.split('\n')) {
+                                if (line.trim() === 'data: [DONE]') break;
+                                if (line.startsWith('data: ')) {
+                                    try {
+                                        const data = JSON.parse(line.slice(6));
+                                        if (data.choices?.[0]?.delta?.content) recallContent += data.choices[0].delta.content;
+                                    } catch (e) { }
+                                }
+                            }
+                        }
+                        rReader.releaseLock();
+                        if (recallContent) {
+                            aiContent = recallContent.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, '').replace(/^[\w\u4e00-\u9fa5]+:\s*/, '').replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
+                        }
+                        addToast(`已调用 ${year}-${month} 记忆`, 'info');
+                    }
+                }
+            }
+
+            const relationActions: { type: any; summary: string }[] = [];
+
+            const nicknameRegex = /\[\[ACTION:CHANGE_NICKNAME\s*[|｜]\s*([\s\S]*?)\s*[|｜]\s*([\s\S]*?)\]\]/gi;
+            let nicknameMatch;
+            while ((nicknameMatch = nicknameRegex.exec(aiContent)) !== null) {
+                const rawTarget = nicknameMatch[1].trim().toLowerCase();
+                const target = ['agent', 'assistant', 'nova', 'ai'].includes(rawTarget) ? 'agent' : 'user';
+                const nextNick = nicknameMatch[2].replace(/[`"'“”‘’]/g, '').trim().slice(0, 20);
+                if (!nextNick) continue;
+                if (target === 'agent') {
+                    await updateAgent({ nickname: nextNick });
+                    relationActions.push({ type: 'agent_nickname_changed', summary: `Agent 聊天昵称更新为「${nextNick}」` });
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: ${char.name} 的聊天昵称更新为「${nextNick}」]` });
+                } else if (target === 'user') {
+                    await updateUserProfile({ nickname: nextNick });
+                    relationActions.push({ type: 'user_nickname_changed', summary: `用户聊天昵称更新为「${nextNick}」` });
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 你的聊天昵称更新为「${nextNick}」]` });
+                }
+            }
+            aiContent = aiContent.replace(nicknameRegex, '').trim();
+
+            let galleryEntriesCache: { name: string; path: string }[] | null = null;
+            const listGalleryEntries = async (): Promise<{ name: string; path: string }[]> => {
+                if (!apiConfig?.galleryWorkspacePath) throw new Error('未配置相册路径');
+                const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+                if (galleryEntriesCache) return galleryEntriesCache;
+                const rootItems = await fsBridge.readDir(apiConfig.galleryWorkspacePath, '/', allowGlobal);
+                const rootFiles = rootItems
+                    .filter(i => i.type === 'file' && /\.(jpe?g|png|webp|gif|bmp)$/i.test(i.name))
+                    .map(i => ({ name: i.name, path: `/${i.name}` }));
+                const folders = rootItems.filter(i => i.type === 'folder');
+                const nested = await Promise.all(folders.map(async f => {
+                    const dirPath = `/${f.name}/`;
+                    const items = await fsBridge.readDir(apiConfig.galleryWorkspacePath, dirPath, allowGlobal);
+                    return items
+                        .filter(i => i.type === 'file' && /\.(jpe?g|png|webp|gif|bmp)$/i.test(i.name))
+                        .map(i => ({ name: i.name, path: `${dirPath}${i.name}` }));
+                }));
+                galleryEntriesCache = [...rootFiles, ...nested.flat()];
+                return galleryEntriesCache;
+            };
+
+            const resolveGalleryPath = async (input: string): Promise<string> => {
+                const token = String(input || '')
+                    .replace(/[`"'“”‘’]/g, '')
+                    .replace(/[，。！？；：,!?;:\)\]\}]+$/g, '')
+                    .trim();
+                if (!token) throw new Error('图片参数为空');
+                const normalized = token.replace(/\\/g, '/');
+                const entries = await listGalleryEntries();
+                if (normalized.startsWith('/')) {
+                    const direct = entries.find(e => e.path.toLowerCase() === normalized.toLowerCase());
+                    if (direct) return direct.path;
+                }
+                const fileName = normalized.split('/').pop() || normalized;
+                const found = entries.find(e => e.name.trim().toLowerCase() === fileName.trim().toLowerCase());
+                if (found) return found.path;
+                const fuzzy = entries.find(e => e.name.trim().toLowerCase().includes(fileName.trim().toLowerCase()));
+                if (fuzzy) return fuzzy.path;
+                throw new Error(`相册中未找到图片: ${token}`);
+            };
+
+            const loadGalleryDataUrl = async (galleryToken: string): Promise<string> => {
+                if (!apiConfig?.galleryWorkspacePath) throw new Error('未配置相册路径');
+                const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+                const galleryPath = await resolveGalleryPath(galleryToken);
+                const relPath = galleryPath.replace(/^\/+/, '');
+                const base64 = await fsBridge.readFileBase64(apiConfig.galleryWorkspacePath, relPath, allowGlobal);
+                const ext = galleryPath.toLowerCase().split('.').pop() || 'jpg';
+                const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
+                return `data:${mime};base64,${base64}`;
+            };
+
+            const avatarRegex = /\[\[ACTION:CHANGE_AVATAR_FROM_GALLERY\|(\s*agent|\s*user)\|([\s\S]*?)\]\]/gi;
+            let avatarMatch;
+            while ((avatarMatch = avatarRegex.exec(aiContent)) !== null) {
+                const target = avatarMatch[1].trim().toLowerCase();
+                const galleryPath = avatarMatch[2].trim();
+                if (!galleryPath) continue;
+                try {
+                    const dataUrl = await loadGalleryDataUrl(galleryPath);
+                    if (target === 'agent') {
+                        await updateAgent({ displayAvatar: dataUrl });
+                        relationActions.push({ type: 'agent_avatar_changed', summary: `Agent 从相册更换头像: ${galleryPath}` });
+                    } else if (target === 'user') {
+                        await updateUserProfile({ displayAvatar: dataUrl });
+                        relationActions.push({ type: 'user_avatar_changed', summary: `用户从相册更换头像: ${galleryPath}` });
+                    }
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 已从相册完成头像更新]` });
+                } catch (e: any) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 头像更换失败 ${galleryPath}: ${e?.message || '未知错误'}]` });
+                }
+            }
+            aiContent = aiContent.replace(avatarRegex, '').trim();
+
+            const coupleRegex = /\[\[ACTION:CHANGE_COUPLE_AVATAR_FROM_GALLERY\|([\s\S]*?)\|([\s\S]*?)\]\]/gi;
+            let coupleMatch;
+            while ((coupleMatch = coupleRegex.exec(aiContent)) !== null) {
+                const userPath = coupleMatch[1].trim();
+                const agentPath = coupleMatch[2].trim();
+                if (!userPath || !agentPath) continue;
+                try {
+                    const [userAvatar, agentAvatar] = await Promise.all([
+                        loadGalleryDataUrl(userPath),
+                        loadGalleryDataUrl(agentPath)
+                    ]);
+                    await updateUserProfile({ displayAvatar: userAvatar });
+                    await updateAgent({ displayAvatar: agentAvatar });
+                    relationActions.push({ type: 'couple_avatar_set', summary: `设置情侣头像 user=${userPath}, agent=${agentPath}` });
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 已设置情侣头像]` });
+                } catch (e: any) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 情侣头像设置失败: ${e?.message || '未知错误'}]` });
+                }
+            }
+            aiContent = aiContent.replace(coupleRegex, '').trim();
+
+            for (const event of relationActions) {
+                await DB.saveRelationEvent({ type: event.type, actor: 'agent', summary: event.summary });
+            }
+
+            const xhsAvailable = !!(xhsEnabled && xhsMcpConfig?.enabled && xhsMcpConfig?.serverUrl);
+            const xhsServerUrl = xhsMcpConfig?.serverUrl || '';
+
+            const xhsSearchRegex = /\[\[XHS_SEARCH:\s*([\s\S]*?)\]\]/gi;
+            let xhsSearchMatch;
+            while ((xhsSearchMatch = xhsSearchRegex.exec(aiContent)) !== null) {
+                const keyword = xhsSearchMatch[1].trim();
+                if (!keyword) continue;
+                if (!xhsAvailable) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法搜索「${keyword}」]` });
+                    continue;
+                }
+                try {
+                    const result = await XhsMcpClient.search(xhsServerUrl, keyword);
+                    const notes = extractNotesFromMcpData(result.data).map(normalizeNote).filter(n => n.noteId).slice(0, 3);
+                    if (notes.length === 0) {
+                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书搜索「${keyword}」暂无结果]` });
+                    } else {
+                        for (const note of notes) {
+                            await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'xhs_card', content: note.title || '小红书笔记', metadata: { xhsNote: note } });
+                        }
+                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 已返回 ${notes.length} 条小红书搜索结果]` });
+                    }
+                } catch (e: any) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书搜索失败: ${e?.message || '未知错误'}]` });
+                }
+            }
+            aiContent = aiContent.replace(xhsSearchRegex, '').trim();
+
+            const xhsFeedRegex = /\[\[XHS_(?:FEED|BROWSE)(?::[^\]]*)?\]\]/gi;
+            if (xhsFeedRegex.test(aiContent)) {
+                if (!xhsAvailable) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法获取推荐流]` });
+                } else {
+                    try {
+                        const result = await XhsMcpClient.getRecommend(xhsServerUrl);
+                        const notes = extractNotesFromMcpData(result.data).map(normalizeNote).filter(n => n.noteId).slice(0, 3);
+                        if (notes.length === 0) {
+                            await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书推荐流暂无可展示内容]` });
+                        } else {
+                            for (const note of notes) {
+                                await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'xhs_card', content: note.title || '小红书推荐', metadata: { xhsNote: note } });
+                            }
+                        }
+                    } catch (e: any) {
+                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 获取小红书推荐失败: ${e?.message || '未知错误'}]` });
+                    }
+                }
+                aiContent = aiContent.replace(xhsFeedRegex, '').trim();
+            }
+
+            const xhsDetailRegex = /\[\[XHS_DETAIL:\s*([\s\S]*?)\]\]/gi;
+            let xhsDetailMatch;
+            while ((xhsDetailMatch = xhsDetailRegex.exec(aiContent)) !== null) {
+                const token = xhsDetailMatch[1].trim();
+                if (!token) continue;
+                if (!xhsAvailable) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法查看详情]` });
+                    continue;
+                }
+                try {
+                    const noteUrl = /^https?:\/\//i.test(token) ? token : `https://www.xiaohongshu.com/explore/${token}`;
+                    const result = await XhsMcpClient.getNoteDetail(xhsServerUrl, noteUrl);
+                    if (result.success && result.data) {
+                        const note = normalizeNote(result.data);
+                        await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'xhs_card', content: note.title || '小红书详情', metadata: { xhsNote: note } });
+                    } else {
+                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书详情获取失败]` });
+                    }
+                } catch (e: any) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书详情失败: ${e?.message || '未知错误'}]` });
+                }
+            }
+            aiContent = aiContent.replace(xhsDetailRegex, '').trim();
+
+            const xhsCommentRegex = /\[\[XHS_COMMENT:\s*([\s\S]*?)\|([\s\S]*?)\]\]/gi;
+            let xhsCommentMatch;
+            while ((xhsCommentMatch = xhsCommentRegex.exec(aiContent)) !== null) {
+                const noteToken = xhsCommentMatch[1].trim();
+                const content = xhsCommentMatch[2].trim();
+                if (!noteToken || !content) continue;
+                if (!xhsAvailable) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法评论]` });
+                    continue;
+                }
+                try {
+                    const noteUrl = /^https?:\/\//i.test(noteToken) ? noteToken : `https://www.xiaohongshu.com/explore/${noteToken}`;
+                    const result = await XhsMcpClient.comment(xhsServerUrl, noteUrl, content);
+                    await DB.saveMessage({
+                        charId: char.id,
+                        role: 'system',
+                        type: 'text',
+                        content: result.success ? `[系统: 小红书评论已发送]` : `[系统: 小红书评论失败: ${result.error || '未知错误'}]`
+                    });
+                } catch (e: any) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书评论失败: ${e?.message || '未知错误'}]` });
+                }
+            }
+            aiContent = aiContent.replace(xhsCommentRegex, '').trim();
+
+            const xhsPostRegex = /\[\[XHS_POST:\s*([\s\S]*?)\|([\s\S]*?)\|?([\s\S]*?)\]\]/gi;
+            let xhsPostMatch;
+            while ((xhsPostMatch = xhsPostRegex.exec(aiContent)) !== null) {
+                const title = xhsPostMatch[1].trim();
+                const content = xhsPostMatch[2].trim();
+                const tagsRaw = (xhsPostMatch[3] || '').trim();
+                const tags = tagsRaw ? tagsRaw.split(/[，,]/).map(t => t.trim().replace(/^#/, '')).filter(Boolean) : [];
+                if (!title || !content) continue;
+                if (!xhsAvailable) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法发帖]` });
+                    continue;
+                }
+                try {
+                    const result = await XhsMcpClient.publishNote(xhsServerUrl, { title, content, tags });
+                    await DB.saveMessage({
+                        charId: char.id,
+                        role: 'system',
+                        type: 'text',
+                        content: result.success ? `[系统: 小红书笔记发布成功]` : `[系统: 小红书发帖失败: ${result.error || '未知错误'}]`
+                    });
+                } catch (e: any) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书发帖失败: ${e?.message || '未知错误'}]` });
+                }
+            }
+            aiContent = aiContent.replace(xhsPostRegex, '').trim();
+
+            const parseResult = await ChatParser.parseAndExecuteActions(aiContent, char, addToast, apiConfig);
+            
+            // == Phase 2.4: Voice Energy Deduction ==
+            const originalWasVoice = /<[语語]音>([\s\S]*?)<\/[语語]音>/i.test(aiContent);
+            if (originalWasVoice && !isVoiceCurrentlyActive && proactiveVoiceAllowed) {
+                setVoiceEnergy(prev => Math.max(0, prev - 60));
+            }
+
+            aiContent = ChatParser.sanitize(parseResult.content);
+            const hasToolResult = parseResult.hasToolResult;
+            
+            // Fix: If a tool result was generated (like a voice message saved to DB), 
+            // but there's no text content to stream, we must update UI here.
+            if (hasToolResult && !aiContent) {
+                setMessages(await DB.getMessagesByCharId(char.id));
+            }
+
+            ContextEnhancer.trackMentionFromResponse(aiContent);
+
+            if (aiContent) {
+                let msgsToUpdate = [];
+                const hasTranslationTags = /<翻译>\s*<原文>[\s\S]*?<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/.test(aiContent);
+
+                if (hasTranslationTags) {
+                    const bilingualEmojis: string[] = [];
+                    let bEm;
+                    const bEmojiPat = /\[\[SEND_EMOJI:\s*(.*?)\]\]/g;
+                    while ((bEm = bEmojiPat.exec(aiContent)) !== null) {
+                        const name = bEm[1].trim();
+                        if (!bilingualEmojis.includes(name)) bilingualEmojis.push(name);
+                    }
+                    aiContent = aiContent.replace(/\[\[SEND_EMOJI:\s*.*?\]\]/g, '').trim();
+
+                    const tagPattern = /<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>([\s\S]*?)<\/译文>\s*<\/翻译>/g;
+                    let lastIndex = 0;
+                    let tagMatch;
+                    while ((tagMatch = tagPattern.exec(aiContent)) !== null) {
+                        const textBefore = aiContent.slice(lastIndex, tagMatch.index).trim();
+                        if (textBefore && ChatParser.hasDisplayContent(textBefore)) {
+                            const chunks = ChatParser.chunkText(ChatParser.sanitize(textBefore));
+                            for (const chunk of chunks) {
+                                if (!chunk) continue;
+                                await new Promise(r => setTimeout(r, Math.min(Math.max(chunk.length * 50, 500), 2000)));
+                                await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: chunk });
+                                msgsToUpdate = await DB.getMessagesByCharId(char.id);
+                                setMessages(msgsToUpdate);
+                            }
+                        }
+
+                        const originalText = ChatParser.sanitize(tagMatch[1].trim());
+                        const translatedText = ChatParser.sanitize(tagMatch[2].trim());
+                        if (originalText || translatedText) {
+                            const biContent = originalText && translatedText ? `${originalText}\n%%BILINGUAL%%\n${translatedText}` : (originalText || translatedText);
+                            await new Promise(r => setTimeout(r, Math.min(Math.max(biContent.length * 30, 400), 2000)));
+                            await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: biContent });
+                            msgsToUpdate = await DB.getMessagesByCharId(char.id);
+                            setMessages(msgsToUpdate);
+                        }
+
+                        lastIndex = tagMatch.index + tagMatch[0].length;
+                    }
+
+                    const textAfter = aiContent.slice(lastIndex).trim();
+                    if (textAfter) {
+                        const cleaned = ChatParser.sanitize(textAfter.replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '').trim());
+                        if (cleaned && ChatParser.hasDisplayContent(cleaned)) {
+                            const chunks = ChatParser.chunkText(cleaned);
+                            for (const chunk of chunks) {
+                                if (!chunk) continue;
+                                await new Promise(r => setTimeout(r, Math.min(Math.max(chunk.length * 50, 500), 2000)));
+                                await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: chunk });
+                                msgsToUpdate = await DB.getMessagesByCharId(char.id);
+                                setMessages(msgsToUpdate);
+                            }
+                        }
+                    }
+
+                    for (const emojiName of bilingualEmojis) {
+                        const foundEmoji = emojis.find(e => e.name === emojiName);
+                        if (foundEmoji) {
+                            await new Promise(r => setTimeout(r, Math.random() * 500 + 300));
+                            await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url });
+                            msgsToUpdate = await DB.getMessagesByCharId(char.id);
+                            setMessages(msgsToUpdate);
+                        }
+                    }
+                } else {
+                    const parts = ChatParser.splitResponse(aiContent);
+                    for (const part of parts) {
+                        if (part.type === 'emoji') {
+                            const foundEmoji = emojis.find(e => e.name === part.content);
+                            if (foundEmoji) {
+                                await new Promise(r => setTimeout(r, Math.random() * 500 + 300));
+                                await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url });
+                                msgsToUpdate = await DB.getMessagesByCharId(char.id);
+                                setMessages(msgsToUpdate);
+                            }
+                        } else {
+                            const rawBlocks = part.content.split(/^\s*---\s*$/m).filter(b => b.trim());
+                            const allChunks: string[] = [];
+                            for (const block of rawBlocks) {
+                                allChunks.push(...ChatParser.chunkText(block.trim()));
+                            }
+                            if (allChunks.length === 0 && part.content.trim()) allChunks.push(part.content.trim());
+
+                            for (const chunk of allChunks) {
+                                // == Phase 2.5: Humanized Pacing ==
+                                // Simulation of typing time based on length, or use fixed interval
+                                let delay = 0;
+                                if (char.replySplitInterval && char.replySplitInterval > 50) {
+                                    delay = char.replySplitInterval;
+                                } else {
+                                    delay = Math.min(Math.max(chunk.length * 45, 800), 4000);
+                                }
+                                await new Promise(r => setTimeout(r, delay));
+
+                                // == Phase 2.6: Agent Citation/Reply Parsing ==
+                                let finalChunk = chunk;
+                                
+                                if (ChatParser.hasDisplayContent(finalChunk)) {
+                                    const cleanChunk = ChatParser.sanitize(finalChunk);
+                                    if (cleanChunk) {
+                                        await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: cleanChunk });
+                                        msgsToUpdate = await DB.getMessagesByCharId(char.id);
+                                        setMessages(msgsToUpdate);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Multi-Prompt concurrency handling (Serial Queue simulation)
+            const latestMsgs = await DB.getMessagesByCharId(char.id);
+            const latestUserMsgs = latestMsgs.filter(m => m.role === 'user');
+            const currentUserMsgs = currentMsgs.filter(m => m.role === 'user');
+
+            if (hasToolResult || latestUserMsgs.length > currentUserMsgs.length) {
+                setTimeout(() => triggerAI(latestMsgs), 500);
+            }
+
+        } catch (e: any) {
+            await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[连接中断: ${e.message}]` });
+            setMessages(await DB.getMessagesByCharId(char.id));
+        } finally {
+            setIsTyping(false);
+            setRecallStatus('');
+        }
+    };
+
+    return {
+        isTyping,
+        recallStatus,
+        lastTokenUsage,
+        setLastTokenUsage,
+        triggerAI
+    };
+};

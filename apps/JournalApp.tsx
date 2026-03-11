@@ -33,55 +33,44 @@ const getLocalDateStr = () => {
 };
 
 const JournalApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter } = useOS();
-    
-    const [mode, setMode] = useState<'select' | 'calendar' | 'write'>('select');
-    const [selectedChar, setSelectedChar] = useState<CharacterProfile | null>(null);
+    const { closeApp, characters, apiConfig, addToast, userProfile, updateCharacter } = useOS();
+
+    const [mode, setMode] = useState<'calendar' | 'write'>('calendar');
+    const selectedChar = characters[0];
     const [diaries, setDiaries] = useState<DiaryEntry[]>([]);
     const [currentEntry, setCurrentEntry] = useState<DiaryEntry | null>(null);
     // FIX: Use local date instead of UTC
     const [selectedDate, setSelectedDate] = useState<string>(getLocalDateStr());
-    
+
     // Editor State
     const [isThinking, setIsThinking] = useState(false);
     const [showStickerPanel, setShowStickerPanel] = useState(false);
     const [activeTab, setActiveTab] = useState<'user' | 'char'>('user'); // View Tab
-    
+
     // Sticker Interaction State
     const [draggingSticker, setDraggingSticker] = useState<string | null>(null);
     const paperRef = useRef<HTMLDivElement>(null);
-    
+
     // Custom Stickers State
-    const [customStickers, setCustomStickers] = useState<{name: string, url: string}[]>([]);
+    const [customStickers, setCustomStickers] = useState<{ name: string, url: string }[]>([]);
     const [showImportModal, setShowImportModal] = useState(false);
     const [importText, setImportText] = useState('');
-    const [deletingSticker, setDeletingSticker] = useState<{name: string, url: string} | null>(null);
+    const [deletingSticker, setDeletingSticker] = useState<{ name: string, url: string } | null>(null);
     const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // --- Data Loading ---
 
     useEffect(() => {
-        if (characters.length > 0 && activeCharacterId) {
-            const initial = characters.find(c => c.id === activeCharacterId);
-            if (initial) {
-                setSelectedChar(initial);
-                setMode('calendar');
-                loadDiaries(initial.id);
-            }
+        if (selectedChar?.id) {
+            loadDiaries(selectedChar.id);
         }
         // Load custom stickers (reusing emoji store)
         DB.getEmojis().then(setCustomStickers);
-    }, [activeCharacterId]);
+    }, [selectedChar?.id]);
 
     const loadDiaries = async (charId: string) => {
         const list = await DB.getDiariesByCharId(charId);
         setDiaries(list.sort((a, b) => b.date.localeCompare(a.date)));
-    };
-
-    const handleCharSelect = (char: CharacterProfile) => {
-        setSelectedChar(char);
-        setMode('calendar');
-        loadDiaries(char.id);
     };
 
     const openEntry = (date: string) => {
@@ -111,10 +100,10 @@ const JournalApp: React.FC = () => {
     const updatePage = (updates: Partial<DiaryEntry['userPage']>, side: 'user' | 'char' = 'user') => {
         if (!currentEntry) return;
         const targetPage = side === 'user' ? 'userPage' : 'charPage';
-        
+
         // If char page doesn't exist yet, init it
         let pageData = currentEntry[targetPage] || { text: '', paperStyle: 'plain', stickers: [] };
-        
+
         setCurrentEntry(prev => {
             if (!prev) return null;
             return {
@@ -136,7 +125,7 @@ const JournalApp: React.FC = () => {
             y: 50,
             rotation: (Math.random() - 0.5) * 40
         };
-        
+
         const currentStickers = targetPage?.stickers || [];
         updatePage({ stickers: [...currentStickers, newSticker] }, side);
         setShowStickerPanel(false);
@@ -184,9 +173,9 @@ const JournalApp: React.FC = () => {
     const handlePointerDown = (e: React.PointerEvent, stickerId: string) => {
         if (activeTab === 'char' && currentEntry?.charPage) return; // Prevent editing char stickers unless strictly needed
         if (activeTab === 'user') {
-             e.stopPropagation();
-             e.currentTarget.setPointerCapture(e.pointerId);
-             setDraggingSticker(stickerId);
+            e.stopPropagation();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            setDraggingSticker(stickerId);
         }
     };
 
@@ -204,7 +193,7 @@ const JournalApp: React.FC = () => {
         const targetPage = activeTab === 'user' ? currentEntry.userPage : currentEntry.charPage;
         if (!targetPage) return;
 
-        const updatedStickers = targetPage.stickers.map(s => 
+        const updatedStickers = targetPage.stickers.map(s =>
             s.id === draggingSticker ? { ...s, x: clampedX, y: clampedY } : s
         );
 
@@ -217,7 +206,7 @@ const JournalApp: React.FC = () => {
     };
 
     // Long press handler for drawer items
-    const handleDrawerTouchStart = (s: {name: string, url: string}) => {
+    const handleDrawerTouchStart = (s: { name: string, url: string }) => {
         longPressTimer.current = setTimeout(() => {
             setDeletingSticker(s);
         }, 600);
@@ -243,7 +232,7 @@ const JournalApp: React.FC = () => {
         }
 
         setIsThinking(true);
-        saveEntry(); 
+        saveEntry();
 
         try {
             // 1. Build Standardized Core Context
@@ -251,9 +240,9 @@ const JournalApp: React.FC = () => {
 
             const styleOptions = PAPER_STYLES.map(p => p.id).join(', ');
             const defaultStickers = DEFAULT_STICKERS.join(' ');
-            
+
             // Format custom stickers for prompt
-            const customStickerContext = customStickers.length > 0 
+            const customStickerContext = customStickers.length > 0
                 ? `Custom Stickers (Name: URL): \n${customStickers.map(s => `- ${s.name}: ${s.url}`).join('\n')}`
                 : '';
 
@@ -261,7 +250,7 @@ const JournalApp: React.FC = () => {
             const recentMsgs = await DB.getMessagesByCharId(selectedChar.id);
             const contextLimit = 30; // Limit to last 30 messages to catch recent events
             const recentContext = recentMsgs.slice(-contextLimit).map(m => {
-                const content = m.type === 'image' ? '[User sent an image]' : m.content;
+                const content = m.type === 'image' ? '[User sent an image]' : m.type === 'video' ? '[User sent a video]' : m.content;
                 return `[${new Date(m.timestamp).toLocaleTimeString()}] ${m.role === 'user' ? 'User' : 'You'}: ${content}`;
             }).join('\n');
 
@@ -315,7 +304,7 @@ Structure:
             const data = await response.json();
             let content = data.choices[0].message.content.trim();
             content = content.replace(/```json/g, '').replace(/```/g, '').trim();
-            
+
             let parsed;
             try {
                 parsed = JSON.parse(content);
@@ -353,7 +342,7 @@ Structure:
 
     const handleArchive = async () => {
         if (!currentEntry || !selectedChar || currentEntry.isArchived) return;
-        
+
         try {
             addToast('正在归档...', 'info');
             const prompt = `Task: 将这篇交换日记 (${currentEntry.date}) 总结为 ${selectedChar.name} 的一条记忆。
@@ -362,7 +351,7 @@ Structure:
             Char Diary: ${currentEntry.charPage?.text || ''}
             
             Output: 一句简短的总结 (中文)。`;
-            
+
             const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
@@ -372,26 +361,26 @@ Structure:
                     temperature: 0.3
                 })
             });
-            
+
             if (response.ok) {
                 const data = await response.json();
                 const summary = data.choices[0].message.content;
-                
+
                 const newMem: MemoryFragment = {
                     id: `mem-${Date.now()}`,
                     date: currentEntry.date,
                     summary,
                     mood: 'diary'
                 };
-                
+
                 const updatedMems = [...selectedChar.memories, newMem];
                 updateCharacter(selectedChar.id, { memories: updatedMems });
-                
+
                 const updatedDiary = { ...currentEntry, isArchived: true };
                 setCurrentEntry(updatedDiary);
                 await DB.saveDiary(updatedDiary);
                 await loadDiaries(selectedChar.id);
-                
+
                 addToast('已归档至记忆库', 'success');
             }
         } catch (e) {
@@ -403,9 +392,9 @@ Structure:
 
     const renderPage = (page: DiaryPage, side: 'user' | 'char') => {
         const style = PAPER_STYLES.find(s => s.id === page.paperStyle) || PAPER_STYLES[0];
-        
+
         return (
-            <div 
+            <div
                 ref={side === activeTab ? paperRef : undefined}
                 className={`relative w-full h-full shadow-md transition-all duration-300 overflow-hidden ${style.css} flex flex-col rounded-3xl touch-none`}
                 style={{ ...style.style }}
@@ -424,25 +413,25 @@ Structure:
                         </span>
                     </div>
 
-                    <textarea 
+                    <textarea
                         value={page.text}
                         onChange={e => updatePage({ text: e.target.value }, side)}
                         placeholder={side === 'user' ? "记录今天发生的事情..." : "等待回复..."}
                         className={`flex-1 w-full bg-transparent resize-none outline-none leading-loose text-[16px] font-normal ${style.text} placeholder:opacity-30 no-scrollbar`}
-                        readOnly={isThinking} 
+                        readOnly={isThinking}
                     />
                 </div>
 
                 {/* Stickers Layer */}
                 {page.stickers.map(s => (
-                    <div 
-                        key={s.id} 
+                    <div
+                        key={s.id}
                         onPointerDown={(e) => handlePointerDown(e, s.id)}
                         className={`absolute text-6xl select-none drop-shadow-md z-20 cursor-move ${draggingSticker === s.id ? 'scale-110 opacity-90' : ''} transition-transform`}
-                        style={{ 
-                            left: `${s.x}%`, 
-                            top: `${s.y}%`, 
-                            transform: `translate(-50%, -50%) rotate(${s.rotation}deg)` 
+                        style={{
+                            left: `${s.x}%`,
+                            top: `${s.y}%`,
+                            transform: `translate(-50%, -50%) rotate(${s.rotation}deg)`
                         }}
                     >
                         {s.url.startsWith('http') || s.url.startsWith('data') ? (
@@ -450,42 +439,12 @@ Structure:
                         ) : s.url}
                     </div>
                 ))}
-                
+
                 {/* Paper Texture Overlay (Subtle) */}
                 <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/paper-fibers.png')] opacity-10 pointer-events-none z-0 mix-blend-multiply"></div>
             </div>
         );
     };
-
-    if (mode === 'select') {
-        return (
-            <div className="h-full w-full bg-amber-50 flex flex-col font-light">
-                {/* Fixed Status Bar overlap with pt-12 */}
-                <div className="pt-12 pb-4 px-6 border-b border-amber-100 bg-amber-50/80 backdrop-blur-sm sticky top-0 z-20 flex items-center justify-between shrink-0 h-24 box-border">
-                    <button onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-amber-100/50 active:scale-90 transition-transform">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6 text-amber-900"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
-                    </button>
-                    <span className="font-bold text-amber-900 text-lg tracking-wide">选择日记本</span>
-                    <div className="w-8"></div>
-                </div>
-                
-                <div className="p-6 grid grid-cols-2 gap-5 overflow-y-auto pb-20 no-scrollbar">
-                    {characters.map(c => (
-                        <div key={c.id} onClick={() => handleCharSelect(c)} className="aspect-[3/4] bg-white rounded-r-2xl rounded-l-md border-l-4 border-l-amber-800 shadow-[2px_4px_12px_rgba(0,0,0,0.08)] p-4 flex flex-col items-center justify-center gap-3 cursor-pointer active:scale-95 transition-all relative overflow-hidden group">
-                            {/* Decorative Spine Shadow */}
-                            <div className="absolute inset-y-0 left-0 w-2 bg-gradient-to-r from-black/10 to-transparent"></div>
-                            
-                            <div className="w-16 h-16 rounded-full p-[2px] border border-amber-100 bg-amber-50">
-                                <img src={c.avatar} className="w-full h-full rounded-full object-cover" />
-                            </div>
-                            <span className="font-bold text-amber-900 text-sm">{c.name}</span>
-                            <span className="text-[9px] text-amber-600 bg-amber-50 px-2 py-1 rounded-full font-mono uppercase tracking-wide">Journal</span>
-                        </div>
-                    ))}
-                </div>
-            </div>
-        );
-    }
 
     if (mode === 'calendar' && selectedChar) {
         return (
@@ -493,10 +452,10 @@ Structure:
                 {/* Expanded Header with pt-12 */}
                 <div className="pt-12 pb-6 px-6 bg-amber-500 shadow-lg shrink-0 rounded-b-[2rem] z-20">
                     <div className="flex justify-between items-start mb-4">
-                         <button onClick={() => setMode('select')} className="text-white/80 hover:text-white transition-colors">
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18" /></svg>
-                         </button>
-                         <div className="w-6"></div>
+                        <button onClick={closeApp} className="text-white/80 hover:text-white transition-colors border border-white/20 p-2 rounded-full bg-black/10 active:scale-95">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
+                        </button>
+                        <div className="w-6"></div>
                     </div>
                     <div className="text-white">
                         <div className="text-xs opacity-70 uppercase tracking-widest font-bold mb-1">Exchange Diary</div>
@@ -509,7 +468,7 @@ Structure:
                     <button onClick={() => openEntry(getLocalDateStr())} className="w-full py-5 mb-8 border-2 border-dashed border-amber-200 rounded-2xl text-amber-500 font-bold flex items-center justify-center gap-2 hover:bg-amber-50 active:scale-95 transition-all">
                         <span className="text-xl">+</span> 写今天的日记
                     </button>
-                    
+
                     <div className="space-y-4">
                         {diaries.map(d => (
                             <div key={d.id} onClick={() => openEntry(d.date)} className="flex items-center gap-4 p-4 rounded-2xl bg-white border border-slate-100 shadow-sm active:scale-95 transition-all hover:shadow-md cursor-pointer relative overflow-hidden group">
@@ -539,7 +498,7 @@ Structure:
     // --- WRITE MODE (Fullscreen Single Page) ---
     return (
         <div className="h-full w-full bg-[#1a1a1a] flex flex-col relative overflow-hidden">
-            
+
             {/* 1. Editor Header with pt-12 safe area */}
             <div className="pt-12 pb-3 px-4 bg-[#1a1a1a]/90 backdrop-blur-md flex items-center justify-between text-white shrink-0 z-30 h-24 box-border">
                 <button onClick={() => setMode('calendar')} className="p-2 -ml-2 text-white/60 hover:text-white rounded-full active:bg-white/10 transition-colors">
@@ -560,11 +519,11 @@ Structure:
             {/* 2. Main Page Area */}
             <div className="flex-1 relative w-full overflow-hidden flex flex-col">
                 <div className="flex-1 w-full max-w-xl mx-auto px-2 pb-4 pt-2 flex flex-col relative">
-                    
+
                     {/* The Page Itself */}
                     <div className="flex-1 relative rounded-3xl transition-all duration-500">
                         {activeTab === 'user' && currentEntry && renderPage(currentEntry.userPage, 'user')}
-                        
+
                         {activeTab === 'char' && (
                             currentEntry?.charPage ? renderPage(currentEntry.charPage, 'char') : (
                                 <div className="w-full h-full bg-[#252525] rounded-3xl border border-white/5 flex flex-col items-center justify-center text-white/40 gap-4 p-8 text-center">
@@ -580,9 +539,9 @@ Structure:
                                         </div>
                                     ) : (
                                         <>
-                                            <p className="text-sm">写完日记后，点击下方按钮<br/>邀请 {selectedChar?.name} 交换日记。</p>
-                                            <button 
-                                                onClick={handleExchange} 
+                                            <p className="text-sm">写完日记后，点击下方按钮<br />邀请 {selectedChar?.name} 交换日记。</p>
+                                            <button
+                                                onClick={handleExchange}
                                                 className="px-6 py-3 bg-amber-500 hover:bg-amber-400 text-white text-sm font-bold rounded-full shadow-[0_0_20px_rgba(245,158,11,0.3)] active:scale-95 transition-all mt-2"
                                             >
                                                 查看 TA 的今日
@@ -601,13 +560,13 @@ Structure:
             <div className="shrink-0 bg-[#222] border-t border-white/5 pb-safe pt-2 z-30">
                 {/* Page Switcher Tabs */}
                 <div className="flex justify-center gap-4 mb-4 px-4">
-                    <button 
+                    <button
                         onClick={() => setActiveTab('user')}
                         className={`flex-1 py-3 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all duration-300 relative overflow-hidden ${activeTab === 'user' ? 'bg-white text-black shadow-lg' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
                     >
                         My Diary
                     </button>
-                    <button 
+                    <button
                         onClick={() => setActiveTab('char')}
                         className={`flex-1 py-3 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all duration-300 relative overflow-hidden ${activeTab === 'char' ? 'bg-amber-500 text-white shadow-lg shadow-amber-900/50' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
                     >
@@ -620,15 +579,15 @@ Structure:
                 <div className="flex items-center justify-between px-6 pb-4">
                     <div className="flex gap-3 bg-[#111] p-1.5 rounded-full border border-white/10">
                         {PAPER_STYLES.slice(0, 4).map(s => (
-                            <button 
-                                key={s.id} 
+                            <button
+                                key={s.id}
                                 onClick={() => updatePage({ paperStyle: s.id }, activeTab)}
                                 className={`w-8 h-8 rounded-full border border-white/10 transition-transform active:scale-90 ${s.css}`}
                                 title={s.name}
                             />
                         ))}
                     </div>
-                    
+
                     <div className="flex gap-3">
                         {/* Regenerate Button (Only visible on char page if reply exists) */}
                         {activeTab === 'char' && currentEntry?.charPage && !isThinking && (
@@ -636,9 +595,9 @@ Structure:
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
                             </button>
                         )}
-                        
-                        <button 
-                            onClick={() => setShowStickerPanel(!showStickerPanel)} 
+
+                        <button
+                            onClick={() => setShowStickerPanel(!showStickerPanel)}
                             className={`w-11 h-11 rounded-full flex items-center justify-center text-xl shadow-lg active:scale-90 transition-transform ${showStickerPanel ? 'bg-white text-black' : 'bg-gradient-to-br from-amber-400 to-orange-500 text-white'}`}
                         >
                             ✨
@@ -659,9 +618,9 @@ Structure:
                                 </button>
                             ))}
                             {customStickers.map((s, i) => (
-                                <button 
-                                    key={`cust-${i}`} 
-                                    onClick={() => addSticker(s.url)} 
+                                <button
+                                    key={`cust-${i}`}
+                                    onClick={() => addSticker(s.url)}
                                     onTouchStart={() => handleDrawerTouchStart(s)}
                                     onTouchEnd={handleDrawerTouchEnd}
                                     onMouseDown={() => handleDrawerTouchStart(s)}
@@ -679,15 +638,15 @@ Structure:
             </div>
 
             {/* Sticker Import Modal */}
-            <Modal 
+            <Modal
                 isOpen={showImportModal} title="添加贴纸" onClose={() => setShowImportModal(false)}
                 footer={<button onClick={handleImportStickers} className="w-full py-3 bg-white/10 text-white font-bold rounded-2xl hover:bg-white/20 transition-all">确认添加</button>}
             >
                 <div className="space-y-3">
                     <p className="text-xs text-slate-500">格式：贴纸名称--图片URL (每行一个)</p>
-                    <textarea 
-                        value={importText} 
-                        onChange={e => setImportText(e.target.value)} 
+                    <textarea
+                        value={importText}
+                        onChange={e => setImportText(e.target.value)}
                         placeholder={`CoolCat--https://...\nHeart--https://...`}
                         className="w-full h-32 bg-slate-100 rounded-2xl p-4 text-sm resize-none focus:outline-none text-slate-700"
                     />
@@ -695,7 +654,7 @@ Structure:
             </Modal>
 
             {/* Sticker Delete Confirmation Modal */}
-            <Modal 
+            <Modal
                 isOpen={!!deletingSticker} title="删除贴纸" onClose={() => setDeletingSticker(null)}
                 footer={<div className="flex gap-2 w-full"><button onClick={() => setDeletingSticker(null)} className="flex-1 py-3 bg-slate-100 text-slate-500 rounded-2xl font-bold">取消</button><button onClick={handleDeleteSticker} className="flex-1 py-3 bg-red-500 text-white rounded-2xl font-bold">删除</button></div>}
             >

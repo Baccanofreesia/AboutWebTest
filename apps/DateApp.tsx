@@ -20,48 +20,53 @@ interface DialogueItem {
 
 const DateApp: React.FC = () => {
     const { closeApp, characters, activeCharacterId, setActiveCharacterId, apiConfig, addToast, updateCharacter, virtualTime, userProfile } = useOS();
-    
-    // Modes: 'select' -> 'peek' -> 'vn' | 'settings' | 'history'
-    const [mode, setMode] = useState<'select' | 'peek' | 'vn' | 'settings' | 'history'>('select');
+
+    // Modes: 'peek' -> 'vn' | 'settings' | 'history'
+    const [mode, setMode] = useState<'peek' | 'vn' | 'settings' | 'history'>('peek');
     const [lastMode, setLastMode] = useState<'peek' | 'vn'>('peek');
-    
-    const [isNovelMode, setIsNovelMode] = useState(false); 
+
+    const [isNovelMode, setIsNovelMode] = useState(false);
     const [peekStatus, setPeekStatus] = useState<string>('');
     const [peekLoading, setPeekLoading] = useState(false);
-    
+
     const [bgImage, setBgImage] = useState<string>('');
     const [currentSprite, setCurrentSprite] = useState<string>('');
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
-    
+
     // Queue now holds objects with emotion data
-    const [dialogueQueue, setDialogueQueue] = useState<DialogueItem[]>([]); 
+    const [dialogueQueue, setDialogueQueue] = useState<DialogueItem[]>([]);
     const [dialogueBatch, setDialogueBatch] = useState<DialogueItem[]>([]); // For Looping
-    
-    const [currentText, setCurrentText] = useState<string>(''); 
-    const [displayedText, setDisplayedText] = useState<string>(''); 
-    const [fullNovelText, setFullNovelText] = useState<string>(''); 
+
+    const [currentText, setCurrentText] = useState<string>('');
+    const [displayedText, setDisplayedText] = useState<string>('');
+    const [fullNovelText, setFullNovelText] = useState<string>('');
     const [isTextAnimating, setIsTextAnimating] = useState(false);
     const [showInputBox, setShowInputBox] = useState(false);
-    
+
     // History State
-    const [historySessions, setHistorySessions] = useState<{date: string, msgs: Message[]}[]>([]);
-    
+    const [historySessions, setHistorySessions] = useState<{ date: string, msgs: Message[] }[]>([]);
+
     // Exit Confirmation State
     const [showExitModal, setShowExitModal] = useState(false);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const novelScrollRef = useRef<HTMLDivElement>(null);
     const [uploadTarget, setUploadTarget] = useState<'bg' | 'sprite'>('bg');
-    const [targetEmotionKey, setTargetEmotionKey] = useState<string>(''); 
-    const [customEmotionName, setCustomEmotionName] = useState(''); 
+    const [targetEmotionKey, setTargetEmotionKey] = useState<string>('');
+    const [customEmotionName, setCustomEmotionName] = useState('');
     const [tempSpriteConfig, setTempSpriteConfig] = useState<SpriteConfig>(DEFAULT_SPRITE_CONFIG);
+    const hasStartedPeek = useRef(false);
 
-    const char = characters.find(c => c.id === activeCharacterId);
+    const char = characters[0];
 
     useEffect(() => {
         if (char) {
             setTempSpriteConfig(char.spriteConfig || DEFAULT_SPRITE_CONFIG);
+            if (!hasStartedPeek.current && mode === 'peek') {
+                hasStartedPeek.current = true;
+                startPeek(char);
+            }
         }
     }, [char, mode]);
 
@@ -73,7 +78,7 @@ const DateApp: React.FC = () => {
 
     useEffect(() => {
         if (!currentText || isNovelMode) {
-            if (isNovelMode) setDisplayedText(currentText); 
+            if (isNovelMode) setDisplayedText(currentText);
             return;
         }
 
@@ -98,19 +103,18 @@ const DateApp: React.FC = () => {
         if (mode === 'settings') {
             setMode(lastMode);
         } else if (mode === 'vn') {
-             setShowExitModal(true); // Open custom modal instead of window.confirm
+            setShowExitModal(true); // Open custom modal instead of window.confirm
         } else if (mode === 'peek') {
-            setMode('select');
-            setPeekStatus('');
+            closeApp(); // Used to be go back to select
         } else if (mode === 'history') {
-            setMode('select');
+            setMode('peek'); // Go back to peek
         }
         else closeApp();
     };
 
     const confirmExit = () => {
         setShowExitModal(false);
-        setMode('select');
+        setMode('peek'); // Used to be select
         setDialogueQueue([]);
         setDialogueBatch([]);
         setCurrentText('');
@@ -125,24 +129,23 @@ const DateApp: React.FC = () => {
     };
 
     const openHistory = async (c: CharacterProfile) => {
-        setActiveCharacterId(c.id);
         const msgs = await DB.getMessagesByCharId(c.id);
-        
+
         // Filter only DateApp messages and sort by time (Newest first for the list)
         const dateMsgs = msgs
             .filter(m => m.metadata?.source === 'date')
-            .sort((a, b) => b.timestamp - a.timestamp); 
+            .sort((a, b) => b.timestamp - a.timestamp);
 
         // Group by session (gap > 1 hour)
-        const sessions: {date: string, msgs: Message[]}[] = [];
-        
+        const sessions: { date: string, msgs: Message[] }[] = [];
+
         if (dateMsgs.length > 0) {
             let currentSession: Message[] = [dateMsgs[0]];
-            
+
             for (let i = 1; i < dateMsgs.length; i++) {
-                const prev = dateMsgs[i-1]; // Newer message
+                const prev = dateMsgs[i - 1]; // Newer message
                 const curr = dateMsgs[i];   // Older message
-                
+
                 // Gap check: prev (newer) - curr (older) > 1 hour
                 if (Math.abs(prev.timestamp - curr.timestamp) > 60 * 60 * 1000) {
                     // Gap detected, finalize current session
@@ -161,7 +164,7 @@ const DateApp: React.FC = () => {
                 msgs: currentSession.reverse()
             });
         }
-        
+
         setHistorySessions(sessions);
         setMode('history');
     };
@@ -182,7 +185,7 @@ const DateApp: React.FC = () => {
         const diffMs = now - lastMsgTimestamp;
         const diffMins = Math.floor(diffMs / (1000 * 60));
         const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-        
+
         const currentHour = new Date().getHours();
         const isNight = currentHour >= 23 || currentHour <= 6;
 
@@ -211,7 +214,7 @@ const DateApp: React.FC = () => {
         const results: DialogueItem[] = [];
         // Regex to split by tags like [happy], [sad], keeping the tags
         const parts = fullText.split(/(\[.*?\])/);
-        
+
         let currentEmotion = initialEmotion;
 
         for (const part of parts) {
@@ -234,7 +237,7 @@ const DateApp: React.FC = () => {
     };
 
     // --- Logic: Peek (Sense Presence) ---
-    
+
     const startPeek = async (c: CharacterProfile) => {
         setActiveCharacterId(c.id);
         setMode('peek');
@@ -243,17 +246,17 @@ const DateApp: React.FC = () => {
 
         try {
             const msgs = await DB.getMessagesByCharId(c.id);
-            const limit = c.contextLimit || 500; 
-            const peekLimit = Math.min(limit, 50); 
-            
+            const limit = c.contextLimit || 500;
+            const peekLimit = Math.min(limit, 50);
+
             const lastMsg = msgs[msgs.length - 1];
             const gapHint = getTimeGapHint(lastMsg?.timestamp);
 
             const recentMsgs = msgs.slice(-peekLimit).map(m => {
-                const content = m.type === 'image' ? '[User sent an image]' : m.content;
+                const content = m.type === 'image' ? '[User sent an image]' : m.type === 'video' ? '[User sent a video]' : m.content;
                 return `${m.role}: ${content}`;
             }).join('\n');
-            
+
             const timeStr = `${virtualTime.day} ${formatTime()}`;
 
             // 1. Build Standardized Core Context (Identity, Worldview, etc.)
@@ -312,21 +315,21 @@ ${recentMsgs}
         if (!char) return;
         setMode('vn');
         setBgImage(char.dateBackground || '');
-        
+
         const s = char.sprites;
         const initialSprite = s?.['normal'] || s?.['default'] || (s && Object.values(s)[0]) || char.avatar;
         setCurrentSprite(initialSprite);
         setTempSpriteConfig(char.spriteConfig || DEFAULT_SPRITE_CONFIG);
-        
+
         // Init Full Text
         const startText = peekStatus || "Waiting for connection...";
         setFullNovelText(startText);
-        
+
         // Initial queue parsing
         const items = parseDialogue(startText, 'normal');
-        setDialogueBatch(items); 
+        setDialogueBatch(items);
         setDialogueQueue(items);
-        
+
         if (items.length > 0) {
             processNextDialogue(items[0], items.slice(1));
             setShowInputBox(false);
@@ -340,9 +343,9 @@ ${recentMsgs}
             // Find sprite for this emotion
             let nextSprite = char.sprites?.[item.emotion];
             if (!nextSprite) {
-                 const keys = Object.keys(char.sprites || {});
-                 const found = keys.find(k => item.emotion!.includes(k));
-                 nextSprite = found ? char.sprites?.[found] : (char.sprites?.['normal'] || char.sprites?.['default'] || char.avatar);
+                const keys = Object.keys(char.sprites || {});
+                const found = keys.find(k => item.emotion!.includes(k));
+                nextSprite = found ? char.sprites?.[found] : (char.sprites?.['normal'] || char.sprites?.['default'] || char.avatar);
             }
             if (nextSprite) setCurrentSprite(nextSprite);
         }
@@ -376,29 +379,29 @@ ${recentMsgs}
             return;
         }
     };
-    
+
     const handleSend = async () => {
         if (!input.trim() || !char || isTyping) return;
-        
+
         const userMsg = input.trim();
         setInput('');
         setShowInputBox(false);
-        
+
         // Append user text to novel view immediately
         const userLog = `\n\n> ${userProfile.name}: ${userMsg}\n\n`;
         setFullNovelText(prev => prev + userLog);
 
         // SAVE WITH METADATA: SOURCE = DATE
-        await DB.saveMessage({ 
-            charId: char.id, 
-            role: 'user', 
-            type: 'text', 
+        await DB.saveMessage({
+            charId: char.id,
+            role: 'user',
+            type: 'text',
             content: userMsg,
             metadata: { source: 'date' } // HIDDEN IN CHAT APP
         });
-        
+
         setIsTyping(true);
-        
+
         try {
             const msgs = await DB.getMessagesByCharId(char.id);
             // Calculate Gap Hint based on the message just before the one we inserted
@@ -411,12 +414,13 @@ ${recentMsgs}
             const historyMsgs = msgs.slice(-limit, -1).map(m => {
                 let content = m.content;
                 if (m.type === 'image') content = '[User sent an image]';
+                if (m.type === 'video') content = '[User sent a video]';
                 return { role: m.role, content: content };
             });
 
             const availableSprites = Object.keys(char.sprites || {});
             const validEmotions = availableSprites.length > 0 ? availableSprites : REQUIRED_EMOTIONS;
-            
+
             // 1. Build Standardized Core Context
             let systemPrompt = ContextBuilder.buildCoreContext(char, userProfile);
 
@@ -463,25 +467,25 @@ ${recentMsgs}
             const content = data.choices[0].message.content;
 
             // SAVE WITH METADATA: SOURCE = DATE
-            await DB.saveMessage({ 
-                charId: char.id, 
-                role: 'assistant', 
-                type: 'text', 
+            await DB.saveMessage({
+                charId: char.id,
+                role: 'assistant',
+                type: 'text',
                 content: content,
                 metadata: { source: 'date' } // HIDDEN IN CHAT APP
             });
-            
+
             // Remove tags for Novel View to keep it clean
             const cleanText = content.replace(/\[.*?\]/g, '');
             setFullNovelText(prev => prev + cleanText);
-            
+
             // Parse for Galgame View (Text chunks + Emotions)
             // Use current sprite as default emotion if not specified at start
-            const items = parseDialogue(content, 'normal'); 
-            
+            const items = parseDialogue(content, 'normal');
+
             setDialogueBatch(items);
             setDialogueQueue(items);
-            
+
             if (items.length > 0) {
                 processNextDialogue(items[0], items.slice(1));
             }
@@ -530,37 +534,7 @@ ${recentMsgs}
 
     // --- Renderers ---
 
-    if (mode === 'select' || !char) {
-        return (
-            <div className="h-full w-full bg-slate-50 flex flex-col font-light">
-                <div className="h-16 flex items-center justify-between px-4 border-b border-slate-200 bg-white sticky top-0 z-10">
-                    <button onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-slate-100">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
-                    </button>
-                    <span className="font-bold text-slate-700">选择见面对象</span>
-                    <div className="w-8"></div>
-                </div>
-                <div className="p-4 grid grid-cols-2 gap-4 overflow-y-auto">
-                    {characters.map(c => (
-                        <div key={c.id} onClick={() => startPeek(c)} className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 active:scale-95 transition-transform flex flex-col items-center gap-3 relative group">
-                            {/* History Icon in Top Right - Clickable independently */}
-                            <button 
-                                onClick={(e) => { e.stopPropagation(); openHistory(c); }}
-                                className="absolute top-2 right-2 p-1.5 text-slate-300 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors z-20 active:scale-90"
-                                title="查看见面记录"
-                            >
-                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
-                                </svg>
-                            </button>
-                            <img src={c.avatar} className="w-16 h-16 rounded-full object-cover" />
-                            <span className="font-bold text-slate-700">{c.name}</span>
-                        </div>
-                    ))}
-                </div>
-            </div>
-        );
-    }
+    if (!char) return null;
 
     if (mode === 'history') {
         return (
@@ -616,12 +590,12 @@ ${recentMsgs}
             <div className="h-full w-full bg-black relative flex flex-col font-sans overflow-hidden">
                 {/* 1. Header */}
                 <div className="pt-24 flex flex-col items-center z-10 shrink-0">
-                     <div className="text-xs font-mono text-neutral-500 mb-2 tracking-[0.2em] font-medium">
+                    <div className="text-xs font-mono text-neutral-500 mb-2 tracking-[0.2em] font-medium">
                         {virtualTime.day.toUpperCase()} {formatTime()}
-                     </div>
-                     <h2 className="text-4xl font-light text-white tracking-[0.3em] uppercase">
+                    </div>
+                    <h2 className="text-4xl font-light text-white tracking-[0.3em] uppercase">
                         {char.name}
-                     </h2>
+                    </h2>
                 </div>
 
                 {/* 2. Loading State */}
@@ -647,21 +621,21 @@ ${recentMsgs}
                         </div>
 
                         <div className="shrink-0 flex flex-col items-center gap-6">
-                             <button 
-                                onClick={enterDate} 
+                            <button
+                                onClick={enterDate}
                                 className="w-full h-14 bg-white text-black rounded-full font-bold tracking-[0.1em] text-sm shadow-[0_0_20px_rgba(255,255,255,0.1)] active:scale-95 transition-transform hover:bg-neutral-200"
-                             >
+                            >
                                 走过去 (Approach)
-                             </button>
-                             
-                             <div className="flex flex-col items-center gap-3 text-[10px] text-neutral-600 font-medium tracking-wider">
-                                 <button onClick={() => openSettings('peek')} className="hover:text-neutral-400 transition-colors">
+                            </button>
+
+                            <div className="flex flex-col items-center gap-3 text-[10px] text-neutral-600 font-medium tracking-wider">
+                                <button onClick={() => openSettings('peek')} className="hover:text-neutral-400 transition-colors">
                                     布置场景 / 设定立绘
-                                 </button>
-                                 <button onClick={handleBack} className="hover:text-neutral-400 transition-colors">
+                                </button>
+                                <button onClick={handleBack} className="hover:text-neutral-400 transition-colors">
                                     悄悄离开
-                                 </button>
-                             </div>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -680,20 +654,20 @@ ${recentMsgs}
                     <span className="font-bold text-slate-700">场景布置</span>
                     <button onClick={handleSaveSettings} className="px-4 py-1.5 bg-primary text-white text-xs font-bold rounded-full shadow-sm active:scale-95 transition-transform">保存</button>
                 </div>
-                
+
                 {/* Live Preview Area */}
                 <div className="h-64 bg-black relative overflow-hidden shrink-0 border-b border-slate-200">
-                     <div className="absolute inset-0 bg-cover bg-center opacity-60" style={{ backgroundImage: char.dateBackground ? `url(${char.dateBackground})` : 'none' }}></div>
-                     <div className="absolute inset-0 flex items-end justify-center pointer-events-none">
-                         <img 
+                    <div className="absolute inset-0 bg-cover bg-center opacity-60" style={{ backgroundImage: char.dateBackground ? `url(${char.dateBackground})` : 'none' }}></div>
+                    <div className="absolute inset-0 flex items-end justify-center pointer-events-none">
+                        <img
                             src={currentSpriteImg}
                             className="max-h-[90%] object-contain transition-transform"
-                            style={{ 
+                            style={{
                                 transform: `translate(${tempSpriteConfig.x}%, ${tempSpriteConfig.y}%) scale(${tempSpriteConfig.scale})`
                             }}
-                         />
-                     </div>
-                     <div className="absolute top-2 left-2 bg-black/50 text-white text-[10px] px-2 py-1 rounded backdrop-blur-sm">预览 (Preview)</div>
+                        />
+                    </div>
+                    <div className="absolute top-2 left-2 bg-black/50 text-white text-[10px] px-2 py-1 rounded backdrop-blur-sm">预览 (Preview)</div>
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-5 space-y-8 pb-20">
@@ -702,22 +676,22 @@ ${recentMsgs}
                         <div className="space-y-6">
                             <div>
                                 <div className="flex justify-between text-[10px] text-slate-500 mb-2"><span>大小缩放 (Scale)</span><span>{tempSpriteConfig.scale.toFixed(1)}x</span></div>
-                                <input type="range" min="0.5" max="2.0" step="0.1" value={tempSpriteConfig.scale} onChange={e => setTempSpriteConfig({...tempSpriteConfig, scale: parseFloat(e.target.value)})} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-primary" />
+                                <input type="range" min="0.5" max="2.0" step="0.1" value={tempSpriteConfig.scale} onChange={e => setTempSpriteConfig({ ...tempSpriteConfig, scale: parseFloat(e.target.value) })} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-primary" />
                             </div>
                             <div>
                                 <div className="flex justify-between text-[10px] text-slate-500 mb-2"><span>左右偏移 (X)</span><span>{tempSpriteConfig.x}%</span></div>
-                                <input type="range" min="-100" max="100" step="5" value={tempSpriteConfig.x} onChange={e => setTempSpriteConfig({...tempSpriteConfig, x: parseInt(e.target.value)})} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-primary" />
+                                <input type="range" min="-100" max="100" step="5" value={tempSpriteConfig.x} onChange={e => setTempSpriteConfig({ ...tempSpriteConfig, x: parseInt(e.target.value) })} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-primary" />
                             </div>
-                             <div>
+                            <div>
                                 <div className="flex justify-between text-[10px] text-slate-500 mb-2"><span>上下偏移 (Y)</span><span>{tempSpriteConfig.y}%</span></div>
-                                <input type="range" min="-50" max="50" step="5" value={tempSpriteConfig.y} onChange={e => setTempSpriteConfig({...tempSpriteConfig, y: parseInt(e.target.value)})} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-primary" />
+                                <input type="range" min="-50" max="50" step="5" value={tempSpriteConfig.y} onChange={e => setTempSpriteConfig({ ...tempSpriteConfig, y: parseInt(e.target.value) })} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-primary" />
                             </div>
                         </div>
                     </section>
 
                     <section>
                         <h3 className="text-xs font-bold text-slate-400 uppercase mb-3">背景 (Background)</h3>
-                        <div 
+                        <div
                             onClick={() => triggerUpload('bg')}
                             className="aspect-video bg-slate-200 rounded-xl overflow-hidden relative border-2 border-dashed border-slate-300 flex items-center justify-center cursor-pointer hover:border-primary group"
                         >
@@ -729,7 +703,7 @@ ${recentMsgs}
                             ) : <span className="text-slate-400 text-xs">+ 上传背景图</span>}
                         </div>
                     </section>
-                    
+
                     <section>
                         <h3 className="text-xs font-bold text-slate-400 uppercase mb-3">立绘管理</h3>
                         <div className="grid grid-cols-3 gap-3">
@@ -760,32 +734,32 @@ ${recentMsgs}
 
     return (
         <div className="h-full w-full relative bg-black overflow-hidden font-sans select-none" onClick={handleScreenClick}>
-            
+
             {/* 1. Background Layer */}
-            <div 
-                className={`absolute inset-0 bg-cover bg-center transition-all duration-1000 ${isNovelMode ? 'blur-xl opacity-30' : 'opacity-80'}`} 
+            <div
+                className={`absolute inset-0 bg-cover bg-center transition-all duration-1000 ${isNovelMode ? 'blur-xl opacity-30' : 'opacity-80'}`}
                 style={{ backgroundImage: bgImage ? `url(${bgImage})` : 'none' }}
             ></div>
-         
-            
+
+
             {/* 2. Menu Layer (Fixed Top Right) */}
             <div className="absolute top-0 right-0 p-4 pt-12 z-[100] flex justify-end gap-3 pointer-events-auto">
-                <button 
-                    onClick={(e) => { e.stopPropagation(); setShowInputBox(!showInputBox); }} 
+                <button
+                    onClick={(e) => { e.stopPropagation(); setShowInputBox(!showInputBox); }}
                     className={`w-10 h-10 rounded-full flex items-center justify-center border transition-all shadow-lg active:scale-95 ${showInputBox ? 'bg-primary border-primary text-white' : 'bg-black/30 backdrop-blur-md border-white/20 text-white hover:bg-white/20'}`}
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" /></svg>
                 </button>
 
-                <button 
-                    onClick={(e) => { e.stopPropagation(); openSettings('vn'); }} 
+                <button
+                    onClick={(e) => { e.stopPropagation(); openSettings('vn'); }}
                     className="bg-black/30 backdrop-blur-md text-white w-10 h-10 rounded-full flex items-center justify-center border border-white/20 hover:bg-white/20 transition-all shadow-lg active:scale-95"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 2.555c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.212 1.281c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-2.555c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281Z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
                 </button>
 
-                <button 
-                    onClick={(e) => { e.stopPropagation(); setIsNovelMode(!isNovelMode); }} 
+                <button
+                    onClick={(e) => { e.stopPropagation(); setIsNovelMode(!isNovelMode); }}
                     className="bg-black/30 backdrop-blur-md text-white w-10 h-10 rounded-full flex items-center justify-center border border-white/20 hover:bg-white/20 transition-all shadow-lg active:scale-95"
                 >
                     {isNovelMode ? (
@@ -794,9 +768,9 @@ ${recentMsgs}
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" /></svg>
                     )}
                 </button>
-                
-                <button 
-                    onClick={(e) => { e.stopPropagation(); handleBack(); }} 
+
+                <button
+                    onClick={(e) => { e.stopPropagation(); handleBack(); }}
                     className="bg-red-500/80 backdrop-blur-md text-white px-4 h-10 rounded-full flex items-center justify-center gap-1 border border-white/20 hover:bg-red-600 transition-colors shadow-lg active:scale-95"
                 >
                     <span className="text-xs font-bold mr-1">离开</span>
@@ -805,21 +779,21 @@ ${recentMsgs}
             </div>
 
             {/* 3. Content Layers */}
-            
+
             {/* 3a. Novel Mode Layer (Immersive Text) */}
             {isNovelMode && (
-                <div 
+                <div
                     ref={novelScrollRef}
                     className="absolute inset-0 z-20 overflow-y-auto no-scrollbar pt-24 pb-32 px-8 mask-image-gradient bg-black/90 backdrop-blur-sm"
                     onClick={(e) => { e.stopPropagation(); setShowInputBox(true); }}
                 >
                     <div className="min-h-full flex flex-col justify-end">
                         <div className="max-w-2xl mx-auto animate-fade-in space-y-6">
-                             {fullNovelText.split('\n').map((line, idx) => line.trim() && (
-                                 <p key={idx} className="whitespace-pre-wrap font-serif text-[18px] text-slate-200 text-justify leading-loose tracking-wide drop-shadow-md border-l-2 border-white/10 pl-4">
-                                     {line}
-                                 </p>
-                             ))}
+                            {fullNovelText.split('\n').map((line, idx) => line.trim() && (
+                                <p key={idx} className="whitespace-pre-wrap font-serif text-[18px] text-slate-200 text-justify leading-loose tracking-wide drop-shadow-md border-l-2 border-white/10 pl-4">
+                                    {line}
+                                </p>
+                            ))}
                         </div>
                     </div>
                 </div>
@@ -831,25 +805,25 @@ ${recentMsgs}
                     {/* Sprite */}
                     <div className="absolute inset-x-0 bottom-0 h-[90%] flex items-end justify-center pointer-events-none z-10 overflow-hidden">
                         {currentSprite && (
-                            <img 
-                                src={currentSprite} 
-                                className="max-h-full max-w-full object-contain drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)] transition-all duration-300 origin-bottom" 
-                                style={{ 
+                            <img
+                                src={currentSprite}
+                                className="max-h-full max-w-full object-contain drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)] transition-all duration-300 origin-bottom"
+                                style={{
                                     filter: showInputBox ? 'brightness(1)' : (isTextAnimating ? 'brightness(1.05)' : 'brightness(1)'),
                                     transform: `translate(${tempSpriteConfig.x}%, ${tempSpriteConfig.y}%) scale(${isTextAnimating ? tempSpriteConfig.scale * 1.02 : tempSpriteConfig.scale})`
                                 }}
                             />
                         )}
                     </div>
-                    
+
                     {/* Text Bubble */}
                     {!isTyping && (
                         <div className="absolute inset-x-0 bottom-8 z-30 flex justify-center">
                             <div className="w-[90%] max-w-lg bg-black/60 backdrop-blur-xl rounded-2xl border border-white/10 p-6 min-h-[140px] shadow-2xl animate-slide-up hover:bg-black/70 cursor-pointer">
                                 <div className="absolute -top-3 left-6">
-                                     <div className="bg-white/90 text-black px-4 py-1 rounded-sm text-xs font-bold tracking-widest uppercase shadow-[0_4px_10px_rgba(0,0,0,0.3)] transform -skew-x-12">
-                                         {char.name}
-                                     </div>
+                                    <div className="bg-white/90 text-black px-4 py-1 rounded-sm text-xs font-bold tracking-widest uppercase shadow-[0_4px_10px_rgba(0,0,0,0.3)] transform -skew-x-12">
+                                        {char.name}
+                                    </div>
                                 </div>
                                 <p className="text-white/90 text-[16px] leading-relaxed font-light tracking-wide drop-shadow-md mt-2">
                                     {displayedText}
@@ -874,23 +848,23 @@ ${recentMsgs}
 
             {/* 4. Common Input Layer (Floating) */}
             <div className={`absolute inset-x-0 bottom-0 z-40 flex justify-center pointer-events-none transition-all duration-300 ${isTyping ? 'opacity-100' : (showInputBox ? 'opacity-100' : 'opacity-0')}`}>
-                
+
                 {isTyping && (
                     <div className="absolute bottom-1/2 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 pointer-events-auto">
                         <div className="bg-black/80 backdrop-blur-md px-6 py-3 rounded-full border border-white/20 shadow-2xl animate-pulse flex items-center gap-3">
-                             <div className="flex gap-1.5">
+                            <div className="flex gap-1.5">
                                 <div className="w-2 h-2 bg-white rounded-full animate-bounce"></div>
                                 <div className="w-2 h-2 bg-white rounded-full animate-bounce delay-75"></div>
                                 <div className="w-2 h-2 bg-white rounded-full animate-bounce delay-150"></div>
-                             </div>
-                             <span className="text-xs text-white font-bold tracking-widest uppercase">Opposite is typing...</span>
+                            </div>
+                            <span className="text-xs text-white font-bold tracking-widest uppercase">Opposite is typing...</span>
                         </div>
                     </div>
                 )}
 
                 {showInputBox && (
                     <div className="w-[90%] max-w-lg bg-white/10 backdrop-blur-xl rounded-2xl border border-white/20 p-2 flex gap-2 shadow-2xl animate-fade-in mb-8 pointer-events-auto" onClick={(e) => e.stopPropagation()}>
-                        <textarea 
+                        <textarea
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
                             placeholder={isTyping ? "等待回应..." : "输入对话..."}
@@ -898,7 +872,7 @@ ${recentMsgs}
                             className="flex-1 bg-transparent px-4 py-3 text-white placeholder:text-white/30 outline-none font-light resize-none h-14 no-scrollbar leading-tight"
                             autoFocus
                         />
-                        <button 
+                        <button
                             onClick={handleSend}
                             disabled={!input.trim() || isTyping}
                             className="px-6 bg-white text-black rounded-xl font-bold text-sm hover:bg-slate-200 disabled:opacity-50 transition-colors h-14 flex items-center justify-center"

@@ -21,7 +21,7 @@ const AppIcon: React.FC<AppIconProps> = ({ app, onClick, size = 'md', hideLabel 
   const sizeClasses = size === 'lg' ? 'w-[4.5rem] h-[4.5rem]' : 'w-[4rem] h-[4rem]';
 
   return (
-    <button 
+    <button
       onClick={onClick}
       className="flex flex-col items-center gap-1.5 group relative"
     >
@@ -34,19 +34,19 @@ const AppIcon: React.FC<AppIconProps> = ({ app, onClick, size = 'md', hideLabel 
         group-hover:bg-white/20 group-hover:scale-105 group-hover:shadow-[0_0_20px_rgba(255,255,255,0.3)] group-hover:border-white/60
         group-active:scale-95
       `}>
-        
+
         {/* Shine effect */}
         <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/10 to-transparent rounded-[1.2rem] opacity-0 group-hover:opacity-100 transition-opacity"></div>
 
         {customIconUrl ? (
-            <img src={customIconUrl} className="w-full h-full object-cover rounded-[1.2rem]" alt={app.name} />
+          <img src={customIconUrl} className="w-full h-full object-cover rounded-[1.2rem]" alt={app.name} />
         ) : (
-            <div className="w-[50%] h-[50%] text-white drop-shadow-[0_2px_5px_rgba(0,0,0,0.3)] opacity-90 group-hover:opacity-100 transition-opacity">
-                 <IconComponent className="w-full h-full" />
-            </div>
+          <div className="w-[50%] h-[50%] text-white drop-shadow-[0_2px_5px_rgba(0,0,0,0.3)] opacity-90 group-hover:opacity-100 transition-opacity">
+            <IconComponent className="w-full h-full" />
+          </div>
         )}
       </div>
-      
+
       {!hideLabel && (
         <span className={`text-[10px] font-bold text-white tracking-widest uppercase opacity-80 group-hover:opacity-100 text-shadow-md transition-opacity ${variant === 'dock' ? 'hidden' : 'block'}`}>
           {app.name}

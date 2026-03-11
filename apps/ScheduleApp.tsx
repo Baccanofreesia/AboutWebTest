@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { Task, Anniversary, CharacterProfile } from '../types';
+import { Task, Anniversary, AgentProfile } from '../types';
 import Modal from '../components/os/Modal';
 import { ContextBuilder } from '../utils/context';
 
@@ -71,7 +71,7 @@ const ScheduleApp: React.FC = () => {
     const [tasks, setTasks] = useState<Task[]>([]);
     const [anniversaries, setAnniversaries] = useState<Anniversary[]>([]);
     const [activeTab, setActiveTab] = useState<'quest' | 'server_events'>('quest');
-    
+
     // Processing State for feedback
     const [processingTaskIds, setProcessingTaskIds] = useState<Set<string>>(new Set());
 
@@ -86,7 +86,7 @@ const ScheduleApp: React.FC = () => {
     // Forms
     const [newTaskTitle, setNewTaskTitle] = useState('');
     const [newTaskSupervisor, setNewTaskSupervisor] = useState<string>(activeCharacterId || '');
-    
+
     const [newAnniTitle, setNewAnniTitle] = useState('');
     const [newAnniDate, setNewAnniDate] = useState('');
     const [newAnniChar, setNewAnniChar] = useState<string>(activeCharacterId || '');
@@ -117,7 +117,7 @@ const ScheduleApp: React.FC = () => {
     // --- AI Logic ---
 
     const generateTaskReward = async (task: Task) => {
-        const supervisor = characters.find(c => c.id === task.supervisorId);
+        const supervisor = characters[0]; // Single agent (Nova)
         if (!supervisor || !apiConfig.apiKey) {
             addToast('任务已完成', 'success');
             return;
@@ -131,7 +131,7 @@ const ScheduleApp: React.FC = () => {
             // 1. Build Persona Context 
             // RESTORED: Full context
             const baseContext = ContextBuilder.buildCoreContext(supervisor, userProfile);
-            
+
             const userPrompt = `
 ### 场景：任务完成 (Task Completed)
 用户 (${userProfile.name}) 刚刚在现实生活中完成了一个任务/契约： "${task.title}"。
@@ -161,8 +161,8 @@ const ScheduleApp: React.FC = () => {
                 body: JSON.stringify({
                     model: apiConfig.model,
                     messages: messages,
-                    temperature: 0.9, 
-                    max_tokens: 2000 
+                    temperature: 0.9,
+                    max_tokens: 2000
                 })
             });
 
@@ -172,14 +172,14 @@ const ScheduleApp: React.FC = () => {
             }
 
             const data = await response.json();
-            
+
             // Extract content, handling potential reasoning_content or empty standard content
             let text = data.choices?.[0]?.message?.content?.trim();
             if (!text && data.choices?.[0]?.message?.reasoning_content) {
                 // If standard content is empty but model "thought" about it, try to use thought or fallback
                 console.warn("AI returned empty content but has reasoning.");
             }
-            
+
             if (text) {
                 text = text.replace(/^["']|["']$/g, '');
                 addToast(`${supervisor.name}: ${text}`, 'success');
@@ -202,7 +202,7 @@ const ScheduleApp: React.FC = () => {
     };
 
     const generateAnniversaryThought = async (anni: Anniversary) => {
-        const char = characters.find(c => c.id === anni.charId);
+        const char = characters[0]; // Single agent (Nova)
         if (!char || !apiConfig.apiKey) return;
 
         // Check cache (24h)
@@ -212,7 +212,7 @@ const ScheduleApp: React.FC = () => {
 
         // FEEDBACK: Show loading state if explicit call
         if (Date.now() - (anni.lastThoughtGeneratedAt || 0) > 10000) {
-             addToast(`${char.name} 正在查阅日历...`, 'info');
+            addToast(`${char.name} 正在查阅日历...`, 'info');
         }
 
         const daysDiff = Math.ceil((new Date(anni.date).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24));
@@ -250,13 +250,13 @@ const ScheduleApp: React.FC = () => {
             });
 
             if (!response.ok) {
-                 const errorText = await response.text();
-                 throw new Error(`API Error ${response.status}: ${errorText.slice(0, 50)}`);
+                const errorText = await response.text();
+                throw new Error(`API Error ${response.status}: ${errorText.slice(0, 50)}`);
             }
 
             const data = await response.json();
             const text = data.choices?.[0]?.message?.content?.trim().replace(/^["']|["']$/g, '');
-            
+
             if (text) {
                 const updatedAnni = { ...anni, aiThought: text, lastThoughtGeneratedAt: Date.now() };
                 await DB.saveAnniversary(updatedAnni);
@@ -264,7 +264,7 @@ const ScheduleApp: React.FC = () => {
             } else {
                 console.warn("AI returned empty thought", data);
             }
-        } catch (e: any) { 
+        } catch (e: any) {
             console.error("Anniversary Thought Error:", e);
             // No toast for background update failure to avoid annoyance
         }
@@ -277,7 +277,7 @@ const ScheduleApp: React.FC = () => {
         const task: Task = {
             id: `task-${Date.now()}`,
             title: newTaskTitle,
-            supervisorId: newTaskSupervisor || characters[0]?.id,
+            // supervisorId removed in NovaClaw (single agent)
             tone: 'gentle', // Deprecated but kept for type compatibility
             isCompleted: false,
             createdAt: Date.now()
@@ -292,7 +292,7 @@ const ScheduleApp: React.FC = () => {
         const updated = { ...task, isCompleted: !task.isCompleted, completedAt: !task.isCompleted ? Date.now() : undefined };
         await DB.saveTask(updated);
         setTasks(prev => prev.map(t => t.id === task.id ? updated : t));
-        
+
         if (updated.isCompleted) {
             // Start Visual Loading State on the Item
             setProcessingTaskIds(prev => new Set(prev).add(task.id));
@@ -320,14 +320,14 @@ const ScheduleApp: React.FC = () => {
             id: `anni-${Date.now()}`,
             title: newAnniTitle,
             date: newAnniDate,
-            charId: newAnniChar || characters[0]?.id
+            // charId removed in NovaClaw (single agent)
         };
         await DB.saveAnniversary(anni);
         setAnniversaries(prev => [...prev, anni].sort((a, b) => a.date.localeCompare(b.date)));
         setShowAnniModal(false);
         setNewAnniTitle('');
         setNewAnniDate('');
-        
+
         // Trigger initial thought
         setTimeout(() => generateAnniversaryThought(anni), 500);
     };
@@ -341,9 +341,9 @@ const ScheduleApp: React.FC = () => {
 
     const getDaysUntil = (dateStr: string) => {
         const today = new Date();
-        today.setHours(0,0,0,0);
+        today.setHours(0, 0, 0, 0);
         const target = new Date(dateStr);
-        target.setHours(0,0,0,0);
+        target.setHours(0, 0, 0, 0);
         const diff = target.getTime() - today.getTime();
         return Math.ceil(diff / (1000 * 60 * 60 * 24));
     };
@@ -361,33 +361,33 @@ const ScheduleApp: React.FC = () => {
 
     return (
         <div className={`h-full w-full flex flex-col ${theme.font} ${theme.bg} ${theme.text} relative overflow-hidden transition-colors duration-500`}>
-             
-             {/* Tech Background Grid (Only for Cyber) */}
-             {currentThemeMode === 'cyber' && (
-                 <div className="absolute inset-0 pointer-events-none opacity-20" 
-                      style={{ 
-                          backgroundImage: 'linear-gradient(rgba(56, 189, 248, 0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(56, 189, 248, 0.1) 1px, transparent 1px)', 
-                          backgroundSize: '40px 40px' 
-                      }}>
-                 </div>
-             )}
-             
-             {/* Soft Background Pattern (Only for Soft) */}
-             {currentThemeMode === 'soft' && (
-                 <div className="absolute inset-0 pointer-events-none opacity-30" 
-                      style={{ 
-                          backgroundImage: 'radial-gradient(#fbcfe8 2px, transparent 2px)', 
-                          backgroundSize: '20px 20px' 
-                      }}>
-                 </div>
-             )}
 
-             {/* Header */}
-             <div className={`pt-12 pb-4 px-6 border-b ${theme.border} backdrop-blur-sm sticky top-0 z-20 flex items-center justify-between shrink-0 h-24 box-border relative transition-colors duration-300`}>
+            {/* Tech Background Grid (Only for Cyber) */}
+            {currentThemeMode === 'cyber' && (
+                <div className="absolute inset-0 pointer-events-none opacity-20"
+                    style={{
+                        backgroundImage: 'linear-gradient(rgba(56, 189, 248, 0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(56, 189, 248, 0.1) 1px, transparent 1px)',
+                        backgroundSize: '40px 40px'
+                    }}>
+                </div>
+            )}
+
+            {/* Soft Background Pattern (Only for Soft) */}
+            {currentThemeMode === 'soft' && (
+                <div className="absolute inset-0 pointer-events-none opacity-30"
+                    style={{
+                        backgroundImage: 'radial-gradient(#fbcfe8 2px, transparent 2px)',
+                        backgroundSize: '20px 20px'
+                    }}>
+                </div>
+            )}
+
+            {/* Header */}
+            <div className={`pt-12 pb-4 px-6 border-b ${theme.border} backdrop-blur-sm sticky top-0 z-20 flex items-center justify-between shrink-0 h-24 box-border relative transition-colors duration-300`}>
                 <button onClick={closeApp} className={`p-2 -ml-2 rounded-full active:scale-90 transition-transform ${currentThemeMode === 'minimal' ? 'bg-[#eef2f6] shadow-[4px_4px_8px_#d1d9e6,-4px_-4px_8px_#ffffff]' : 'hover:bg-black/5'}`}>
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={`w-6 h-6 ${theme.accent}`}><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                 </button>
-                
+
                 {/* Tabs */}
                 <div className={`flex gap-1 p-1 rounded-lg ${currentThemeMode === 'cyber' ? 'bg-black/40 border border-cyan-900/50' : (currentThemeMode === 'minimal' ? 'bg-[#eef2f6] shadow-[inset_2px_2px_5px_#d1d9e6,inset_-2px_-2px_5px_#ffffff]' : 'bg-white/50')}`}>
                     <button onClick={() => setActiveTab('quest')} className={`px-4 py-1.5 rounded text-xs font-bold transition-all ${activeTab === 'quest' ? `${theme.accent} ${currentThemeMode === 'cyber' ? 'bg-cyan-900/50 shadow-sm' : (currentThemeMode === 'minimal' ? 'shadow-[2px_2px_5px_#d1d9e6,-2px_-2px_5px_#ffffff] bg-[#eef2f6]' : 'bg-white shadow-sm')}` : `${theme.textSub}`}`}>{theme.label}</button>
@@ -402,19 +402,19 @@ const ScheduleApp: React.FC = () => {
                         {currentThemeMode === 'soft' && '🌸'}
                         {currentThemeMode === 'minimal' && '⚪'}
                     </button>
-                    
+
                     {/* Add Button */}
                     <button onClick={() => activeTab === 'quest' ? setShowTaskModal(true) : setShowAnniModal(true)} className={`p-2 rounded-full active:scale-90 transition-transform ${theme.accent} ${currentThemeMode === 'minimal' ? 'shadow-[4px_4px_8px_#d1d9e6,-4px_-4px_8px_#ffffff]' : 'hover:bg-white/10'}`}>
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
                     </button>
                 </div>
-                
+
                 {/* Decoration Line */}
                 {currentThemeMode === 'cyber' && <div className="absolute bottom-0 left-0 h-[1px] w-full bg-gradient-to-r from-transparent via-cyan-500/50 to-transparent"></div>}
             </div>
 
             <div className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-8 z-10">
-                
+
                 {/* Hero Anniversary Card */}
                 {upcomingAnni && (
                     <div className={`w-full rounded-2xl p-5 relative overflow-hidden group transition-all duration-300 ${currentThemeMode === 'minimal' ? 'bg-[#eef2f6] shadow-[inset_5px_5px_10px_#d1d9e6,inset_-5px_-5px_10px_#ffffff]' : (currentThemeMode === 'soft' ? 'bg-gradient-to-r from-pink-300 to-purple-300 text-white shadow-lg shadow-pink-200' : 'bg-gradient-to-r from-slate-900 to-slate-800 border border-purple-500/30')}`}>
@@ -424,10 +424,10 @@ const ScheduleApp: React.FC = () => {
                                 <div className="text-3xl font-bold tracking-tighter">{getDaysUntil(upcomingAnni.date)} <span className="text-xs opacity-60 font-normal">天后</span></div>
                             </div>
                             <div className="text-xl font-bold mb-4">{upcomingAnni.title}</div>
-                            
+
                             {/* AI Thought Bubble */}
                             <div className={`flex items-start gap-3 p-3 rounded-xl ${currentThemeMode === 'minimal' ? 'bg-[#eef2f6] shadow-[5px_5px_10px_#d1d9e6,-5px_-5px_10px_#ffffff]' : 'bg-white/20 backdrop-blur-md'}`}>
-                                <img src={characters.find(c => c.id === upcomingAnni.charId)?.avatar} className="w-8 h-8 rounded-full object-cover" />
+                                <img src={characters[0]?.avatar} className="w-8 h-8 rounded-full object-cover" />
                                 <div className={`text-xs font-medium leading-relaxed italic ${currentThemeMode === 'minimal' ? 'text-slate-500' : 'text-white/90'}`}>
                                     "{upcomingAnni.aiThought || "加载中..."}"
                                 </div>
@@ -442,7 +442,7 @@ const ScheduleApp: React.FC = () => {
                             <div className={`w-2 h-2 rounded-full animate-pulse ${currentThemeMode === 'cyber' ? 'bg-cyan-500' : (currentThemeMode === 'soft' ? 'bg-pink-400' : 'bg-slate-400')}`}></div>
                             <h3 className={`text-xs font-bold uppercase tracking-[0.2em] ${theme.accent}`}>进行中任务</h3>
                         </div>
-                        
+
                         {tasks.filter(t => !t.isCompleted).length === 0 && (
                             <div className={`text-center py-12 border-2 border-dashed rounded-xl ${currentThemeMode === 'cyber' ? 'border-slate-800' : 'border-slate-200'}`}>
                                 <div className={theme.textSub}>暂无任务</div>
@@ -450,9 +450,9 @@ const ScheduleApp: React.FC = () => {
                         )}
 
                         {tasks.filter(t => !t.isCompleted).map(task => {
-                            const supervisor = characters.find(c => c.id === task.supervisorId);
+                            const supervisor = characters[0]; // Single agent (Nova)
                             const isProcessing = processingTaskIds.has(task.id);
-                            
+
                             return (
                                 <div key={task.id} className={`${theme.card} p-4 flex items-center gap-4 group relative overflow-hidden transition-all duration-300`}>
                                     {/* Supervisor Icon */}
@@ -460,7 +460,7 @@ const ScheduleApp: React.FC = () => {
                                         {supervisor ? <img src={supervisor.avatar} className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" /> : <span className="text-xs">?</span>}
                                         <div className={`absolute -bottom-0 -right-0 w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${currentThemeMode === 'soft' ? 'bg-white text-pink-500' : 'bg-black text-cyan-500'}`}>!</div>
                                     </div>
-                                    
+
                                     <div className="flex-1">
                                         <div className={`${theme.text} font-bold text-sm tracking-wide`}>{task.title}</div>
                                         <div className={`text-[10px] ${theme.textSub} mt-1 font-mono uppercase`}>
@@ -475,14 +475,14 @@ const ScheduleApp: React.FC = () => {
                                             <span className={`text-[10px] font-bold animate-pulse ${theme.accent}`}>验收中...</span>
                                         </div>
                                     ) : (
-                                        <button 
+                                        <button
                                             onClick={() => handleToggleTask(task)}
                                             className={`px-4 py-2 text-[10px] font-bold uppercase tracking-wider rounded transition-all active:scale-95 ${currentThemeMode === 'minimal' ? 'shadow-[4px_4px_8px_#d1d9e6,-4px_-4px_8px_#ffffff] text-slate-500 active:shadow-[inset_2px_2px_5px_#d1d9e6,inset_-2px_-2px_5px_#ffffff]' : (currentThemeMode === 'soft' ? 'bg-pink-100 text-pink-500' : 'bg-cyan-900/30 text-cyan-400 border border-cyan-800')}`}
                                         >
                                             完成
                                         </button>
                                     )}
-                                    
+
                                     <button onClick={() => handleDeleteTask(task.id)} className="absolute top-2 right-2 text-slate-400 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1">×</button>
                                 </div>
                             );
@@ -507,36 +507,36 @@ const ScheduleApp: React.FC = () => {
                     <div className={`relative pl-6 space-y-8 before:absolute before:left-2 before:top-2 before:bottom-0 before:w-[1px] ${theme.decoLine}`}>
                         {/* Anniversaries List */}
                         <div>
-                             <h3 className={`text-xs font-bold uppercase tracking-widest mb-6 -ml-6 pl-6 ${theme.textSub}`}>时间线事件</h3>
-                             <div className="space-y-4">
-                                 {anniversaries.map(a => (
-                                     <div key={a.id} className="relative group">
-                                         <div className={`absolute -left-[20px] top-4 w-2 h-2 rounded-full z-10 ${currentThemeMode === 'cyber' ? 'bg-black border border-purple-500' : 'bg-pink-400'}`}></div>
-                                         <div className={`${theme.card} p-4 flex justify-between items-center transition-colors`}>
-                                             <div>
-                                                 <div className={`text-sm font-bold ${theme.text}`}>{a.title}</div>
-                                                 <div className={`text-[10px] ${theme.textSub} font-mono mt-1`}>{a.date} · {characters.find(c => c.id === a.charId)?.name}</div>
-                                             </div>
-                                             <button onClick={() => handleDeleteAnni(a.id)} className="text-slate-400 hover:text-red-400 p-2 opacity-0 group-hover:opacity-100 transition-opacity">×</button>
-                                         </div>
-                                     </div>
-                                 ))}
-                             </div>
+                            <h3 className={`text-xs font-bold uppercase tracking-widest mb-6 -ml-6 pl-6 ${theme.textSub}`}>时间线事件</h3>
+                            <div className="space-y-4">
+                                {anniversaries.map(a => (
+                                    <div key={a.id} className="relative group">
+                                        <div className={`absolute -left-[20px] top-4 w-2 h-2 rounded-full z-10 ${currentThemeMode === 'cyber' ? 'bg-black border border-purple-500' : 'bg-pink-400'}`}></div>
+                                        <div className={`${theme.card} p-4 flex justify-between items-center transition-colors`}>
+                                            <div>
+                                                <div className={`text-sm font-bold ${theme.text}`}>{a.title}</div>
+                                                <div className={`text-[10px] ${theme.textSub} font-mono mt-1`}>{a.date} · {characters[0]?.name}</div>
+                                            </div>
+                                            <button onClick={() => handleDeleteAnni(a.id)} className="text-slate-400 hover:text-red-400 p-2 opacity-0 group-hover:opacity-100 transition-opacity">×</button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
                         </div>
 
                         {/* Completed Tasks History Log */}
-                         <div>
-                             <h3 className={`text-xs font-bold uppercase tracking-widest mb-6 -ml-6 pl-6 pt-4 ${theme.textSub}`}>完成履历</h3>
-                             <div className="space-y-4">
-                                 {tasks.filter(t => t.isCompleted).sort((a,b) => (b.completedAt || 0) - (a.completedAt || 0)).map(t => (
-                                     <div key={t.id} className="relative">
-                                         <div className={`absolute -left-[20px] top-2 w-2 h-2 rounded-full z-10 ${currentThemeMode === 'cyber' ? 'bg-black border border-green-600' : 'bg-slate-300'}`}></div>
-                                         <div className={`text-xs ${theme.textSub} font-mono`}>[{new Date(t.completedAt || 0).toLocaleDateString()}] 任务完成</div>
-                                         <div className={`text-sm ${theme.text} font-bold mt-1 pl-1 border-l-2 ${theme.decoLine}`}>{t.title}</div>
-                                     </div>
-                                 ))}
-                             </div>
-                         </div>
+                        <div>
+                            <h3 className={`text-xs font-bold uppercase tracking-widest mb-6 -ml-6 pl-6 pt-4 ${theme.textSub}`}>完成履历</h3>
+                            <div className="space-y-4">
+                                {tasks.filter(t => t.isCompleted).sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0)).map(t => (
+                                    <div key={t.id} className="relative">
+                                        <div className={`absolute -left-[20px] top-2 w-2 h-2 rounded-full z-10 ${currentThemeMode === 'cyber' ? 'bg-black border border-green-600' : 'bg-slate-300'}`}></div>
+                                        <div className={`text-xs ${theme.textSub} font-mono`}>[{new Date(t.completedAt || 0).toLocaleDateString()}] 任务完成</div>
+                                        <div className={`text-sm ${theme.text} font-bold mt-1 pl-1 border-l-2 ${theme.decoLine}`}>{t.title}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
                     </div>
                 )}
 
@@ -546,7 +546,7 @@ const ScheduleApp: React.FC = () => {
             <Modal isOpen={showTaskModal} title={currentThemeMode === 'cyber' ? "INITIALIZE QUEST" : "新建任务"} onClose={() => setShowTaskModal(false)} footer={<button onClick={handleAddTask} className={`w-full py-3 font-bold transition-all ${theme.buttonPrimary}`}>确认添加</button>}>
                 <div className={`space-y-6 ${currentThemeMode === 'minimal' ? 'p-2' : ''}`}>
                     <input autoFocus value={newTaskTitle} onChange={e => setNewTaskTitle(e.target.value)} placeholder="任务目标 (例如: 背单词)" className={`w-full px-4 py-3 text-sm focus:outline-none ${theme.input}`} />
-                    
+
                     <div>
                         <label className="text-[10px] font-bold text-slate-400 uppercase mb-2 block tracking-widest">选择监督人</label>
                         <div className="flex gap-3 overflow-x-auto no-scrollbar pb-2">
@@ -566,7 +566,7 @@ const ScheduleApp: React.FC = () => {
                 <div className={`space-y-4 ${currentThemeMode === 'minimal' ? 'p-2' : ''}`}>
                     <input value={newAnniTitle} onChange={e => setNewAnniTitle(e.target.value)} placeholder="事件名称 (例如: 第一次见面)" className={`w-full px-4 py-3 text-sm focus:outline-none ${theme.input}`} />
                     <input type="date" value={newAnniDate} onChange={e => setNewAnniDate(e.target.value)} className={`w-full px-4 py-3 text-sm focus:outline-none ${theme.input}`} />
-                    
+
                     <div>
                         <label className="text-[10px] font-bold text-slate-400 uppercase mb-2 block tracking-widest">关联对象</label>
                         <div className="flex gap-3 overflow-x-auto no-scrollbar pb-2">
