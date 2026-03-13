@@ -370,6 +370,98 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         initData();
     }, []);
 
+    // --- Centralized File Watcher (Polling) ---
+    const lastFileUpdateRef = useRef({ agentSoul: 0, userProfile: 0 });
+    useEffect(() => {
+        if (!isDataLoaded || !apiConfig.nativeWorkspacePath) return;
+
+        let cancelled = false;
+        const tick = async () => {
+            if (cancelled) return;
+            const root = apiConfig.nativeWorkspacePath;
+            if (!root) return;
+            const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+            const galleryRoot = apiConfig.galleryWorkspacePath || '';
+
+            try {
+                const items = await fsBridge.readDir(root, '/', allowGlobal);
+                
+                // 1. Check Agent_Soul.md
+                const soulFile = items.find(i => i.type === 'file' && i.name === 'Agent_Soul.md');
+                if (soulFile && soulFile.updatedAt && soulFile.updatedAt > lastFileUpdateRef.current.agentSoul) {
+                    const content = await fsBridge.readFile(root, 'Agent_Soul.md', allowGlobal);
+                    const soulData = parseAgentSoulMarkdown(content);
+                    if (soulData && agent) {
+                        const systemPrompt = buildAgentSystemPromptFromSoul(soulData);
+                        
+                        // Resolve avatar if it's a path
+                        let displayAvatar = agent.displayAvatar;
+                        if (soulData.avatar && !soulData.avatar.startsWith('data:') && !soulData.avatar.startsWith('http') && !soulData.avatar.startsWith('blob:')) {
+                            try {
+                                const relPath = soulData.avatar.replace(/^\/+/, '');
+                                const base64 = await fsBridge.readFileBase64(galleryRoot, relPath, allowGlobal);
+                                displayAvatar = `data:image/jpeg;base64,${base64}`;
+                            } catch {}
+                        }
+
+                        if (!cancelled) {
+                            setAgent(prev => {
+                                if (!prev) return null;
+                                return {
+                                    ...prev,
+                                    name: soulData.name || prev.name,
+                                    nickname: soulData.nickname || prev.nickname,
+                                    avatar: soulData.avatar || prev.avatar,
+                                    displayAvatar: displayAvatar,
+                                    description: soulData.persona || prev.description,
+                                    systemPrompt: systemPrompt
+                                };
+                            });
+                            lastFileUpdateRef.current.agentSoul = soulFile.updatedAt;
+                        }
+                    }
+                }
+
+                // 2. Check USER.md
+                const userFile = items.find(i => i.type === 'file' && i.name === 'USER.md');
+                if (userFile && userFile.updatedAt && userFile.updatedAt > lastFileUpdateRef.current.userProfile) {
+                    const content = await fsBridge.readFile(root, 'USER.md', allowGlobal);
+                    const parsedUser = parseUserProfileMarkdown(content);
+                    if (parsedUser) {
+                        let displayAvatar = userProfile.displayAvatar;
+                        if (parsedUser.avatar && !parsedUser.avatar.startsWith('data:') && !parsedUser.avatar.startsWith('http') && !parsedUser.avatar.startsWith('blob:')) {
+                            try {
+                                const relPath = parsedUser.avatar.replace(/^\/+/, '');
+                                const base64 = await fsBridge.readFileBase64(galleryRoot, relPath, allowGlobal);
+                                displayAvatar = `data:image/jpeg;base64,${base64}`;
+                            } catch {}
+                        }
+
+                        if (!cancelled) {
+                            setUserProfile(prev => ({
+                                ...prev,
+                                name: parsedUser.name || prev.name,
+                                nickname: parsedUser.nickname || prev.nickname,
+                                bio: parsedUser.bio || prev.bio,
+                                avatar: parsedUser.avatar || prev.avatar,
+                                displayAvatar: displayAvatar
+                            }));
+                            lastFileUpdateRef.current.userProfile = userFile.updatedAt;
+                        }
+                    }
+                }
+            } catch (e) {
+                // Silently fail on read errors during polling
+            }
+        };
+
+        const timer = setInterval(tick, 3000);
+        return () => {
+            cancelled = true;
+            clearInterval(timer);
+        };
+    }, [isDataLoaded, apiConfig.nativeWorkspacePath, apiConfig.securityPolicy, apiConfig.galleryWorkspacePath, agent?.id, userProfile.name]);
+
     // --- Scheduled Message Polling (Single Agent) ---
     useEffect(() => {
         if (!isDataLoaded || !agent) return;

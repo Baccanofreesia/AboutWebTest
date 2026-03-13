@@ -97,36 +97,7 @@ const UserApp: React.FC = () => {
         );
     }, [userBioInput, userNameInput, userNicknameInput, userProfile.bio, userProfile.name, userProfile.nickname]);
 
-    useEffect(() => {
-        if (!apiConfig.nativeWorkspacePath) return;
-        let cancelled = false;
-        const tick = async () => {
-            if (cancelled) return;
-            if (isUserFormDirty()) return;
-            try {
-                const items = await fsBridge.readDir(apiConfig.nativeWorkspacePath, '/', allowGlobal);
-                const file = items.find(i => i.type === 'file' && i.name === 'USER.md');
-                if (!file?.updatedAt) return;
-                if (file.updatedAt <= userMdUpdatedAtRef.current) return;
-                const content = await fsBridge.readFile(apiConfig.nativeWorkspacePath, 'USER.md', allowGlobal);
-                const parsed = parseUserProfileMarkdown(content);
-                userMdUpdatedAtRef.current = file.updatedAt;
-                if (!parsed) return;
-                await updateUserProfile({
-                    name: parsed.name || userProfile.name || 'User',
-                    nickname: parsed.nickname || undefined,
-                    bio: parsed.bio || undefined,
-                    avatar: parsed.avatar || userProfile.avatar
-                });
-            } catch { }
-        };
-        const timer = setInterval(tick, 3000);
-        tick();
-        return () => {
-            cancelled = true;
-            clearInterval(timer);
-        };
-    }, [allowGlobal, apiConfig.nativeWorkspacePath, isUserFormDirty, updateUserProfile, userProfile.avatar, userProfile.name]);
+    // Local USER.md polling removed - handled by OSContext
 
     const writeUserProfileFile = useCallback(async (updates: Partial<{ name: string; nickname: string; avatar: string; bio: string }>) => {
         if (!apiConfig.nativeWorkspacePath) return false;
@@ -547,10 +518,14 @@ const UserApp: React.FC = () => {
                                 </p>
                             </div>
                             <div className="w-full mt-2 p-4 bg-violet-50/50 rounded-2xl space-y-4">
-                                <div className="text-center">
+                                <div className="text-center px-2">
                                     <p className="text-xs text-violet-600 font-bold mb-1">Agent 真实身份</p>
                                     <p className="text-sm text-slate-600 font-medium">{agent.name}</p>
-                                    <p className="text-[10px] text-slate-400 mt-1">{agent.description?.slice(0, 80)}...</p>
+                                    <p className="text-[10px] text-slate-400 mt-2 italic leading-relaxed">
+                                        {(agent.description || '暂无详细设定').length > 120 
+                                            ? `${agent.description?.slice(0, 120)}...` 
+                                            : agent.description}
+                                    </p>
                                 </div>
                                 <div className="pt-3 border-t border-violet-100 flex justify-center">
                                     <button

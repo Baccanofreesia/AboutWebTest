@@ -1,4 +1,4 @@
-﻿export interface AgentSoulData {
+export interface AgentSoulData {
     name: string;
     nickname?: string;
     avatar?: string;
@@ -43,9 +43,14 @@ const normalizeValue = (value: string): string => {
 };
 
 const extractSection = (content: string, heading: string): string => {
-    const regex = new RegExp(`^##\\s+${heading}\\s*$([\\s\\S]*?)(?=^##\\s+|\\s*$)`, 'mi');
-    const match = content.match(regex);
-    return (match?.[1] || '').trim();
+    const sections = content.split(/^##\s+/m);
+    for (const section of sections) {
+        const lines = section.split(/\r?\n/);
+        if (lines[0].trim().toLowerCase() === heading.toLowerCase()) {
+            return lines.slice(1).join('\n').trim();
+        }
+    }
+    return '';
 };
 
 const extractNotesBlock = (content: string): string => {
