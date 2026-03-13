@@ -80,6 +80,8 @@ const VoiceMessageRenderer: React.FC<{
     onDirectDelete?: (msg: Message) => void;
 }> = ({ m, isUser, styleConfig, workspaceRootPath, allowGlobal, onUpdateMessage, onDirectDelete }) => {
     const [audioUrl, setAudioUrl] = useState(m.content?.startsWith('workspace://') ? '' : m.content || '');
+    const stripVoiceLogPrefix = (text: string) =>
+        text.replace(/^\s*(?:\[\s*)?(?:你|用户|User|Assistant)\s*发送了语音消息\s*\d+(?:\.\d+)?\s*秒(?:\s*,\s*无法转写)?\s*(?:\]\s*)?[:：]?\s*/i, '').trim();
 
     useEffect(() => {
         if (m.content?.startsWith('workspace://')) {
@@ -98,7 +100,7 @@ const VoiceMessageRenderer: React.FC<{
     }, [m.content, workspaceRootPath, allowGlobal]);
 
     const voiceDuration = m.metadata?.duration || 0;
-    const voiceTranscription = m.metadata?.transcription || '';
+    const voiceTranscription = stripVoiceLogPrefix(m.metadata?.transcription || '');
 
     return (
         <VoiceBubble
@@ -483,6 +485,8 @@ const MessageItem = React.memo(({
         .replace(/%%TRANS%%[\s\S]*/gi, '')
         .replace(/%%BILINGUAL%%/gi, '\n')
         .replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '')
+        .replace(/\[\s*\d{1,2}:\d{2}(?::\d{2})?\s*\]\s*/g, '')
+        .replace(/\(\s*\d{1,2}:\d{2}(?::\d{2})?\s*\)/g, '')
         .replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, '')
         .replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, '')
         .replace(/\n{3,}/g, '\n\n')

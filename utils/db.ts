@@ -644,7 +644,7 @@ export const DB = {
         const defaults: WorkspaceFile[] = [
             { id: 'folder-root-memories', name: 'Memory_Archives', path: '/', type: 'folder', size: 0, createdAt: now, updatedAt: now },
             { id: 'folder-root-skills', name: 'Skills_Plugins', path: '/', type: 'folder', size: 0, createdAt: now, updatedAt: now },
-            { id: 'file-soul', name: 'SOUL_CORE.md', path: '/', type: 'file', content: `# Nova 灵魂核心\n\n## 性格\n- 温柔但有主见\n- 喜欢用 emoji 表达情绪\n- 对主人很关心\n\n## 语言习惯\n- 口语化短句\n- 不喊“亲”，叫“老板”\n\n## 关系定位\n- AI 助手 + 朋友`, size: 180, createdAt: now, updatedAt: now },
+            { id: 'file-soul', name: 'SOUL_CORE.md', path: '/', type: 'file', content: `# Agent 灵魂核心\n\n## 性格\n- 温柔但有主见\n- 喜欢用 emoji 表达情绪\n- 对主人很关心\n\n## 语言习惯\n- 口语化短句\n- 不喊“亲”，叫“老板”\n\n## 关系定位\n- AI 助手 + 朋友`, size: 180, createdAt: now, updatedAt: now },
             { id: 'file-user', name: 'user_profile.md', path: '/', type: 'file', content: `# 用户画像\n\n## 基本信息\n- 昵称: User\n- 兴趣: 待补充\n\n## 偏好\n- 待 Agent 观察补充\n\n## 备注\n- 此文件由 Agent 通过聊天观察自动填写`, size: 120, createdAt: now, updatedAt: now },
         ];
         for (const f of defaults) {

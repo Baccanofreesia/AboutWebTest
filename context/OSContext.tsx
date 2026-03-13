@@ -6,6 +6,7 @@ import { fsBridge } from '../utils/fsBridge';
 import { RealtimeConfig, defaultRealtimeConfig } from '../utils/realtimeContext';
 import { ContextEnhancer } from '../utils/contextEnhancer';
 import { resolveApiEndpoint } from '../utils/apiResolver';
+import { parseAgentSoulMarkdown, buildAgentSystemPromptFromSoul, parseUserProfileMarkdown } from '../utils/profileFiles';
 
 // ============================================
 // NovaClaw OS Context — Single Agent Architecture
@@ -237,20 +238,105 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 // Look for any existing agent with id='nova' or use the first character
                 let foundAgent = dbChars.find(c => c.id === 'nova') || dbChars[0] || novaDefault;
 
+                let nextUserProfile = dbUser || defaultUserProfile;
+
                 // Workspace -> IndexedDB Cold Start Sync
                 const savedApi = localStorage.getItem('os_api_config');
                 if (savedApi) {
                     const parsedApi = JSON.parse(savedApi);
                     if (parsedApi.nativeWorkspacePath) {
+                        const allowGlobal = !!parsedApi.securityPolicy?.allowGlobalFileAccess;
+                        let loadedFromAgentSoul = false;
+                        const galleryRoot = parsedApi.galleryWorkspacePath || '';
+
+                        const toRelPath = (path: string) => path.replace(/^\/+/, '');
+                        const extOf = (name: string) => {
+                            const idx = name.lastIndexOf('.');
+                            return idx >= 0 ? name.slice(idx).toLowerCase() : '';
+                        };
+                        const mimeFromName = (name: string) => {
+                            const ext = extOf(name);
+                            if (ext === '.png') return 'image/png';
+                            if (ext === '.webp') return 'image/webp';
+                            if (ext === '.gif') return 'image/gif';
+                            if (ext === '.bmp') return 'image/bmp';
+                            return 'image/jpeg';
+                        };
+                        const loadGalleryAvatar = async (path: string): Promise<string | null> => {
+                            if (!galleryRoot || !path) return null;
+                            try {
+                                const name = path.split('/').filter(Boolean).pop() || 'avatar.jpg';
+                                const base64 = await fsBridge.readFileBase64(galleryRoot, toRelPath(path), allowGlobal);
+                                return `data:${mimeFromName(name)};base64,${base64}`;
+                            } catch {
+                                return null;
+                            }
+                        };
+
                         try {
-                            const soulContent = await fsBridge.readFile(parsedApi.nativeWorkspacePath, 'SOUL.md');
-                            if (soulContent && soulContent !== foundAgent.systemPrompt) {
-                                foundAgent = { ...foundAgent, systemPrompt: soulContent };
+                            const agentSoulContent = await fsBridge.readFile(parsedApi.nativeWorkspacePath, 'Agent_Soul.md', allowGlobal);
+                            const soulData = parseAgentSoulMarkdown(agentSoulContent);
+                            if (soulData) {
+                                const systemPrompt = buildAgentSystemPromptFromSoul(soulData);
+                                const avatarPath = soulData.avatar || '';
+                                let displayAvatar = foundAgent.displayAvatar;
+                                if (avatarPath && !avatarPath.startsWith('data:') && !avatarPath.startsWith('http') && !avatarPath.startsWith('blob:')) {
+                                    const resolved = await loadGalleryAvatar(avatarPath);
+                                    if (resolved) displayAvatar = resolved;
+                                }
+                                foundAgent = {
+                                    ...foundAgent,
+                                    name: soulData.name || foundAgent.name,
+                                    nickname: soulData.nickname || foundAgent.nickname,
+                                    avatar: avatarPath || foundAgent.avatar,
+                                    displayAvatar,
+                                    description: soulData.persona || foundAgent.description,
+                                    systemPrompt: systemPrompt || foundAgent.systemPrompt
+                                };
                                 await DB.saveCharacter(foundAgent);
-                                console.log("Cold Start: Synced SOUL.md from Workspace to IndexedDB");
+                                loadedFromAgentSoul = true;
+                                console.log("Cold Start: Synced Agent_Soul.md from Workspace to IndexedDB");
                             }
                         } catch (e) {
-                            console.log("Workspace SOUL.md not found or error reading. Using IndexedDB baseline.");
+                            // Agent_Soul.md not found, fallback to SOUL.md
+                        }
+
+                        if (!loadedFromAgentSoul) {
+                            try {
+                                const soulContent = await fsBridge.readFile(parsedApi.nativeWorkspacePath, 'SOUL.md', allowGlobal);
+                                if (soulContent && soulContent !== foundAgent.systemPrompt) {
+                                    foundAgent = { ...foundAgent, systemPrompt: soulContent };
+                                    await DB.saveCharacter(foundAgent);
+                                    console.log("Cold Start: Synced SOUL.md from Workspace to IndexedDB");
+                                }
+                            } catch (e) {
+                                console.log("Workspace SOUL.md not found or error reading. Using IndexedDB baseline.");
+                            }
+                        }
+
+                        try {
+                            const userProfileContent = await fsBridge.readFile(parsedApi.nativeWorkspacePath, 'USER.md', allowGlobal);
+                            const parsedUser = parseUserProfileMarkdown(userProfileContent);
+                            if (parsedUser) {
+                                const avatarPath = parsedUser.avatar || '';
+                                let displayAvatar = nextUserProfile.displayAvatar;
+                                if (avatarPath && !avatarPath.startsWith('data:') && !avatarPath.startsWith('http') && !avatarPath.startsWith('blob:')) {
+                                    const resolved = await loadGalleryAvatar(avatarPath);
+                                    if (resolved) displayAvatar = resolved;
+                                }
+                                nextUserProfile = {
+                                    ...nextUserProfile,
+                                    name: parsedUser.name || nextUserProfile.name,
+                                    nickname: parsedUser.nickname || nextUserProfile.nickname,
+                                    bio: parsedUser.bio || nextUserProfile.bio,
+                                    avatar: avatarPath || nextUserProfile.avatar,
+                                    displayAvatar
+                                };
+                                await DB.saveUserProfile(nextUserProfile);
+                                console.log("Cold Start: Synced USER.md from Workspace to IndexedDB");
+                            }
+                        } catch (e) {
+                            // USER.md not found
                         }
 
                         // --- NEW: Boot Sync for all Workspace files ---
@@ -272,7 +358,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
                 setAgent(foundAgent);
                 setCustomThemes(dbThemes);
-                if (dbUser) setUserProfile(dbUser);
+                setUserProfile(nextUserProfile);
 
             } catch (err) {
                 console.error('Data init failed:', err);
@@ -562,6 +648,55 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             throw new Error("Agent or API Config not ready");
         }
 
+        const parseSseText = (raw: string): string => {
+            let text = '';
+            const lines = raw.split(/\r?\n/);
+            for (const line of lines) {
+                if (!line.startsWith('data:')) continue;
+                const payload = line.slice(5).trim();
+                if (!payload || payload === '[DONE]') continue;
+                try {
+                    const obj = JSON.parse(payload);
+                    const choiceDelta = obj?.choices?.[0]?.delta?.content;
+                    if (choiceDelta) {
+                        text += choiceDelta;
+                        continue;
+                    }
+                    const delta = obj?.delta || {};
+                    if (delta.type === 'text_delta' && delta.text) {
+                        text += delta.text;
+                        continue;
+                    }
+                    if (delta.text && delta.type !== 'thinking_delta') {
+                        text += delta.text;
+                        continue;
+                    }
+                    const blockText = obj?.content_block?.text;
+                    if (blockText) {
+                        text += blockText;
+                        continue;
+                    }
+                    if (obj?.reply) {
+                        text += obj.reply;
+                        continue;
+                    }
+                } catch { }
+            }
+            return text.trim();
+        };
+
+        const extractText = (data: any): string => {
+            return (
+                data?.choices?.[0]?.message?.content?.trim() ||
+                data?.choices?.[0]?.delta?.content?.trim() ||
+                data?.choices?.[0]?.text?.trim() ||
+                data?.content?.[0]?.text?.trim() ||
+                data?.reply?.trim() ||
+                data?.output_text?.trim() ||
+                ''
+            );
+        };
+
         const resolved = resolveApiEndpoint(apiConfig);
 
         let basePrompt = `You are ${agent.name}. ${agent.description}\n\n`;
@@ -575,7 +710,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             { role: 'user', content: prompt }
         ];
 
-        let requestBody: any = { model: apiConfig.model, messages, temperature: 0.85 };
+        let requestBody: any = { model: apiConfig.model, messages, temperature: 0.85, stream: false };
         if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
         const res = await fetch(resolved.chatUrl, {
             method: 'POST',
@@ -583,9 +718,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             body: JSON.stringify(requestBody)
         });
 
-        if (!res.ok) throw new Error(`API Error ${res.status}`);
-        const data = await res.json();
-        return data.choices?.[0]?.message?.content || "";
+        const raw = await res.text();
+        if (!res.ok) throw new Error(`API Error ${res.status}: ${raw.slice(0, 200)}`);
+        try {
+            const data = JSON.parse(raw);
+            const text = extractText(data);
+            if (text) return text;
+        } catch {
+            // fall through to SSE parse
+        }
+        const sseText = parseSseText(raw);
+        if (sseText) return sseText;
+        throw new Error('API返回无法解析');
     };
 
     return (

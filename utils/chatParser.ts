@@ -785,6 +785,7 @@ export const ChatParser = {
 
                 const voiceTextRaw = naturalParts.join(' ').replace(/\s{2,}/g, ' ').trim();
                 const voiceText = voiceTextRaw
+                    .replace(/^\s*(?:\[\s*)?(?:你|用户|User|Assistant)\s*发送了语音消息\s*\d+(?:\.\d+)?\s*秒(?:\s*,\s*无法转写)?\s*(?:\]\s*)?[:：]?\s*/i, '')
                     .replace(/\[\s*\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|second|seconds|毫秒|秒)\s*\]\s*/gi, '')
                     .trim();
                 if (voiceText) {
@@ -826,10 +827,12 @@ export const ChatParser = {
             // Strip leaked timestamps from chat history context:
             // [2026-02-11 13:52] / [2026/2/11 13:52] / [2026.02.11 13:52] (bracketed)
             .replace(/\[\s*\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*\]\s*/g, '')
+            .replace(/\[\s*\d{1,2}:\d{2}(?::\d{2})?\s*\]\s*/g, '')
             // Strip simulated thinking time markers like [1s], [2.5s], [300ms]
             .replace(/\[\s*\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|second|seconds|毫秒|秒)\s*\]\s*/gi, '')
             // 2026-02-11 13:52 format (unbracketed, at line start)
             .replace(/^\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*/gm, '')
+            .replace(/\(\s*\d{1,2}:\d{2}(?::\d{2})?\s*\)/g, '')
             // （下午1:52）or（上午10:30）Chinese 12h parenthetical
             .replace(/（[上下]午\d{1,2}[：:]\d{2}）/g, '')
             // (1:52 PM) or (10:30 AM) English 12h parenthetical
@@ -874,6 +877,7 @@ export const ChatParser = {
             .replace(/%%BILINGUAL%%/gi, '')
             .replace(/%%TRANS%%[\s\S]*/gi, '')
             .replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '')
+            .replace(/\[\s*\d{1,2}:\d{2}(?::\d{2})?\s*\]\s*/g, '')
             .replace(/\[\s*\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|second|seconds|毫秒|秒)\s*\]\s*/gi, '')
             .replace(/^\s*---\s*$/gm, '')
             .replace(/``+/g, '')

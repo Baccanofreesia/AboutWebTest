@@ -9,6 +9,7 @@ import { fsBridge } from '../utils/fsBridge';
 import { XhsMcpClient, extractNotesFromMcpData, normalizeNote } from '../utils/xhsMcpClient';
 import { voiceStopIntent } from '../utils/voiceIntent';
 import { resolveApiEndpoint } from '../utils/apiResolver';
+import { AgentSoulData, UserProfileData, buildAgentSoulMarkdown, buildUserMarkdownFromProfile, parseAgentSoulMarkdown, parseUserProfileMarkdown } from '../utils/profileFiles';
 
 interface UseChatAIProps {
     char: CharacterProfile | undefined;
@@ -52,6 +53,48 @@ export const useChatAI = ({
     const formatDate = (ts: number) => {
         const d = new Date(ts);
         return `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    };
+
+    const syncAgentSoulFile = async (updates: Partial<AgentSoulData>) => {
+        if (!apiConfig?.nativeWorkspacePath || !char) return;
+        const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+        const root = apiConfig.nativeWorkspacePath;
+        let base: AgentSoulData = {
+            name: char.name || 'Agent',
+            nickname: char.nickname,
+            avatar: char.avatar,
+            persona: char.description
+        };
+        try {
+            const content = await fsBridge.readFile(root, 'Agent_Soul.md', allowGlobal);
+            const parsed = parseAgentSoulMarkdown(content);
+            if (parsed) base = { ...base, ...parsed };
+        } catch { }
+        const next: AgentSoulData = { ...base, ...updates, name: (updates.name || base.name || 'Agent') };
+        try {
+            await fsBridge.writeFile(root, 'Agent_Soul.md', buildAgentSoulMarkdown(next), allowGlobal);
+        } catch { }
+    };
+
+    const syncUserProfileFile = async (updates: Partial<UserProfileData>) => {
+        if (!apiConfig?.nativeWorkspacePath) return;
+        const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+        const root = apiConfig.nativeWorkspacePath;
+        let base: UserProfileData = {
+            name: userProfile.name || 'User',
+            nickname: userProfile.nickname,
+            avatar: userProfile.avatar,
+            bio: userProfile.bio
+        };
+        try {
+            const content = await fsBridge.readFile(root, 'USER.md', allowGlobal);
+            const parsed = parseUserProfileMarkdown(content);
+            if (parsed) base = { ...base, ...parsed };
+        } catch { }
+        const next: UserProfileData = { ...base, ...updates, name: updates.name || base.name || 'User' };
+        try {
+            await fsBridge.writeFile(root, 'USER.md', buildUserMarkdownFromProfile(next), allowGlobal);
+        } catch { }
     };
 
     const getDetailedLogsForMonth = (year: string, month: string) => {
@@ -111,25 +154,38 @@ export const useChatAI = ({
             const userDisplayName = userProfile.nickname || userProfile.name;
             const agentDisplayName = char.nickname || char.name;
             let baseSystemPrompt = ContextBuilder.buildCoreContext(char, userProfile);
+            const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+            const workspaceRootPath = apiConfig?.nativeWorkspacePath || '';
+            if (workspaceRootPath) {
+                try {
+                    const agentsGuide = await fsBridge.readFile(workspaceRootPath, 'AGENTS.md', allowGlobal);
+                    if (agentsGuide && agentsGuide.trim()) {
+                        baseSystemPrompt = `### Workspace Instructions (AGENTS.md)\n${agentsGuide.trim()}\n\n${baseSystemPrompt}`;
+                    }
+                } catch { }
+            }
 
             // == 连续语音模式与主动语音指令注入 ==
-            const isVoiceCurrentlyActive = voiceActiveOverride !== undefined ? voiceActiveOverride : sessionVoiceActive;
+            const lastUserMsg = currentMsgs.filter(m => m.role === 'user').pop();
+            const lastUserText = lastUserMsg?.type === 'voice'
+                ? (lastUserMsg.metadata?.transcription || '')
+                : (lastUserMsg?.content || '');
+            const stopIntentDetected = !!lastUserText && voiceStopIntent.test(String(lastUserText));
+            const isVoiceCurrentlyActive = (voiceActiveOverride !== undefined ? voiceActiveOverride : sessionVoiceActive) && !stopIntentDetected;
             if (isVoiceCurrentlyActive && char.chatVoiceEnabled) {
                 baseSystemPrompt += `\n### 连续语音对话模式 (Continuous Voice Mode Active)\n   - **要求**: 你的回复**必须全程使用** \`<语音>文本</语音>\` 标签包裹所有自然语言文本内容。每一对标签会生成一个独立的语音气泡。即使有多个气泡，也请确保每个气泡的文本都在标签内。**非自然内容（URL/文件或动作标签/表情包指令）如需发送，请与语音分离输出，不要放在 <语音> 内**。
    - **退出提示**: 除非用户明确要求停止（如“发文字”），否则请坚持全程语音。\n`;
             } else {
-                // Defensive: If the last user message was voice but session mode is off, explicitly tell AI not to use voice tags.
-                const lastUserMsg = currentMsgs.filter(m => m.role === 'user').pop();
-                if (lastUserMsg?.type === 'voice' || (lastUserMsg?.content && voiceStopIntent.test(lastUserMsg.content))) {
+                // Defensive: If the last user message was voice but session mode is off, or user explicitly said stop, explicitly tell AI not to use voice tags.
+                if (lastUserMsg?.type === 'voice' || stopIntentDetected) {
                     baseSystemPrompt += `\n**注意**: 用户当前倾向于使用文本交流，请【严禁】输出 \`<语音>\` 标签。保持纯文本回复。\n`;
                 }
 
-                if (proactiveVoiceAllowed && char.chatVoiceEnabled) {
+                if (proactiveVoiceAllowed && char.chatVoiceEnabled && !stopIntentDetected) {
                     baseSystemPrompt += `\n### 主动启发语音 (Proactive Voice Initiative)\n1. **特殊权限**: 你现在拥有发出语音的“体力”。\n2. **触发策略**: 你可以**挑选**并尝试在回复中主动包含 \`<语音>文本</语音>\`。推荐在表达剧烈情感（委屈、狂喜、生气）、低声分享秘密或想要对用户撒娇时使用。\n3. **注意**: 这是一个高成本动作，如果当前对话气氛平淡，请继续使用普通文字。\n`;
                 }
             }
 
-            const workspaceRootPath = apiConfig?.nativeWorkspacePath || '';
             let stickerSets: StickerSet[] = [];
             let stickerIndex = '';
             let stickerRelevantNames: string[] = [];
@@ -496,10 +552,12 @@ export const useChatAI = ({
                 if (!nextNick) continue;
                 if (target === 'agent') {
                     await updateAgent({ nickname: nextNick });
+                    await syncAgentSoulFile({ nickname: nextNick });
                     relationActions.push({ type: 'agent_nickname_changed', summary: `Agent 聊天昵称更新为「${nextNick}」` });
                     await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: ${char.name} 的聊天昵称更新为「${nextNick}」]` });
                 } else if (target === 'user') {
                     await updateUserProfile({ nickname: nextNick });
+                    await syncUserProfileFile({ nickname: nextNick });
                     relationActions.push({ type: 'user_nickname_changed', summary: `用户聊天昵称更新为「${nextNick}」` });
                     await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 你的聊天昵称更新为「${nextNick}」]` });
                 }
@@ -547,15 +605,20 @@ export const useChatAI = ({
                 throw new Error(`相册中未找到图片: ${token}`);
             };
 
-            const loadGalleryDataUrl = async (galleryToken: string): Promise<string> => {
+            const loadGalleryDataUrl = async (galleryPath: string): Promise<string> => {
                 if (!apiConfig?.galleryWorkspacePath) throw new Error('未配置相册路径');
                 const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
-                const galleryPath = await resolveGalleryPath(galleryToken);
                 const relPath = galleryPath.replace(/^\/+/, '');
                 const base64 = await fsBridge.readFileBase64(apiConfig.galleryWorkspacePath, relPath, allowGlobal);
                 const ext = galleryPath.toLowerCase().split('.').pop() || 'jpg';
                 const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
                 return `data:${mime};base64,${base64}`;
+            };
+
+            const resolveGalleryData = async (token: string): Promise<{ resolvedPath: string; dataUrl: string }> => {
+                const resolvedPath = await resolveGalleryPath(token);
+                const dataUrl = await loadGalleryDataUrl(resolvedPath);
+                return { resolvedPath, dataUrl };
             };
 
             const avatarRegex = /\[\[ACTION:CHANGE_AVATAR_FROM_GALLERY\|(\s*agent|\s*user)\|([\s\S]*?)\]\]/gi;
@@ -565,13 +628,15 @@ export const useChatAI = ({
                 const galleryPath = avatarMatch[2].trim();
                 if (!galleryPath) continue;
                 try {
-                    const dataUrl = await loadGalleryDataUrl(galleryPath);
+                    const { resolvedPath, dataUrl } = await resolveGalleryData(galleryPath);
                     if (target === 'agent') {
-                        await updateAgent({ displayAvatar: dataUrl });
-                        relationActions.push({ type: 'agent_avatar_changed', summary: `Agent 从相册更换头像: ${galleryPath}` });
+                        await updateAgent({ avatar: resolvedPath, displayAvatar: dataUrl });
+                        await syncAgentSoulFile({ avatar: resolvedPath });
+                        relationActions.push({ type: 'agent_avatar_changed', summary: `Agent 从相册更换头像: ${resolvedPath}` });
                     } else if (target === 'user') {
-                        await updateUserProfile({ displayAvatar: dataUrl });
-                        relationActions.push({ type: 'user_avatar_changed', summary: `用户从相册更换头像: ${galleryPath}` });
+                        await updateUserProfile({ avatar: resolvedPath, displayAvatar: dataUrl });
+                        await syncUserProfileFile({ avatar: resolvedPath });
+                        relationActions.push({ type: 'user_avatar_changed', summary: `用户从相册更换头像: ${resolvedPath}` });
                     }
                     await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 已从相册完成头像更新]` });
                 } catch (e: any) {
@@ -587,13 +652,15 @@ export const useChatAI = ({
                 const agentPath = coupleMatch[2].trim();
                 if (!userPath || !agentPath) continue;
                 try {
-                    const [userAvatar, agentAvatar] = await Promise.all([
-                        loadGalleryDataUrl(userPath),
-                        loadGalleryDataUrl(agentPath)
+                    const [userResolved, agentResolved] = await Promise.all([
+                        resolveGalleryData(userPath),
+                        resolveGalleryData(agentPath)
                     ]);
-                    await updateUserProfile({ displayAvatar: userAvatar });
-                    await updateAgent({ displayAvatar: agentAvatar });
-                    relationActions.push({ type: 'couple_avatar_set', summary: `设置情侣头像 user=${userPath}, agent=${agentPath}` });
+                    await updateUserProfile({ avatar: userResolved.resolvedPath, displayAvatar: userResolved.dataUrl });
+                    await updateAgent({ avatar: agentResolved.resolvedPath, displayAvatar: agentResolved.dataUrl });
+                    await syncUserProfileFile({ avatar: userResolved.resolvedPath });
+                    await syncAgentSoulFile({ avatar: agentResolved.resolvedPath });
+                    relationActions.push({ type: 'couple_avatar_set', summary: `设置情侣头像 user=${userResolved.resolvedPath}, agent=${agentResolved.resolvedPath}` });
                     await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 已设置情侣头像]` });
                 } catch (e: any) {
                     await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 情侣头像设置失败: ${e?.message || '未知错误'}]` });

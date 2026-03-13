@@ -95,6 +95,39 @@ export class StickerParser {
     }
 
     /**
+     * Deletes a single sticker entry from a category (.txt file) by URL.
+     */
+    static async deleteStickerItem(workspaceRoot: string, category: string, url: string): Promise<boolean> {
+        if (!workspaceRoot || !category || category === '收藏') return false;
+        if (!url || url.startsWith('local://')) return false;
+        const filePath = `stickers/${category}.txt`;
+        try {
+            const content = await fsBridge.readFile(workspaceRoot, filePath, true);
+            const lines = content.split(/\r?\n/);
+            const urlTarget = url.trim();
+            const urlPat = /(https?:\/\/[^\s"'<>]+(?:\.(?:png|jpg|jpeg|gif|webp)|sticker|v-sticker)[^\s"'<>]*)/i;
+            let removed = false;
+            const kept = lines.filter(line => {
+                const match = line.match(urlPat);
+                if (!match) return true;
+                const lineUrl = match[0].trim();
+                if (lineUrl === urlTarget) {
+                    removed = true;
+                    return false;
+                }
+                return true;
+            });
+            if (!removed) return false;
+            const endsWithNewline = /\r?\n$/.test(content);
+            const nextContent = kept.join('\n') + (endsWithNewline && kept.length > 0 ? '\n' : '');
+            await fsBridge.writeFile(workspaceRoot, filePath, nextContent, true);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
      * Legacy/Fallback: Scans the stickers/ directory in the workspace and parses all valid files.
      * Use sparingly for global RAG indexing.
      */

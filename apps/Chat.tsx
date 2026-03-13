@@ -261,10 +261,20 @@ const Chat: React.FC = () => {
     const [consecutiveTextCount, setConsecutiveTextCount] = useState(0);
     const [voiceEnergy, setVoiceEnergy] = useState(100);
     const [voiceLock, setVoiceLock] = useState(false);
+    const voiceLockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const voiceRecorder = useVoiceRecorder();
     const voiceResultRef = useRef<Promise<{ url: string; blob: Blob; duration: number; } | null> | null>(null);
     const sttTranscriptRef = useRef<string>('');
     const { toastMsg: voiceToastMsg, toastVisible: voiceToastVisible, showToast: showVoiceToast, dismissToast: dismissVoiceToast } = useVoiceToast();
+
+    useEffect(() => {
+        return () => {
+            if (voiceLockTimerRef.current) {
+                clearTimeout(voiceLockTimerRef.current);
+                voiceLockTimerRef.current = null;
+            }
+        };
+    }, []);
 
     // ── Phase 2.5: Message Coalescing ──
     const [chatWaitTime, setChatWaitTime] = useState(3000); // ms
@@ -1032,6 +1042,8 @@ ${rawLog.substring(0, 8000)}`;
         if (!char || (!input.trim() && !customContent)) return;
         const text = customContent || input.trim();
         const type = customType || 'text';
+        const intentText = type === 'voice' ? String(metadata?.transcription || '').trim() : text;
+        const intentSource = intentText || text;
 
         if (!apiConfig || !apiConfig.baseUrl) {
             addToast('⚠️ 请先在系统设置中配置 API', 'error');
@@ -1046,16 +1058,31 @@ ${rawLog.substring(0, 8000)}`;
 
         let nextVoiceActive = sessionVoiceActive;
         // 1. Check for explicit intent first (Highest Priority)
-        if (voiceStopIntent.test(text)) {
+        const scheduleVoiceUnlock = () => {
+            if (voiceLockTimerRef.current) clearTimeout(voiceLockTimerRef.current);
+            const minMs = 30 * 60 * 1000;
+            const maxMs = 60 * 60 * 1000;
+            const delay = minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+            voiceLockTimerRef.current = setTimeout(() => {
+                setVoiceLock(false);
+            }, delay);
+        };
+
+        if (voiceStopIntent.test(intentSource)) {
             nextVoiceActive = false;
             setSessionVoiceActive(false);
             setVoiceLock(true); // Lock the mode to text-only
             setConsecutiveTextCount(0);
-        } else if (voiceStartIntent.test(text)) {
+            scheduleVoiceUnlock();
+        } else if (voiceStartIntent.test(intentSource)) {
             nextVoiceActive = true;
             setSessionVoiceActive(true);
             setVoiceLock(false); // Release the lock
             setConsecutiveTextCount(0);
+            if (voiceLockTimerRef.current) {
+                clearTimeout(voiceLockTimerRef.current);
+                voiceLockTimerRef.current = null;
+            }
         } else {
             // 2. No explicit intent, follow message type if NOT locked
             if (type === 'voice') {
@@ -1835,7 +1862,17 @@ ${rawLog.substring(0, 8000)}`;
                                     <div className="flex flex-wrap gap-3 px-1">
                                         {characters.map(c => (
                                             <button key={c.id} onClick={() => { setActiveCharacterId(c.id); setShowPanel('none'); }} className={`px-4 py-2 rounded-xl text-xs font-bold border flex items-center gap-2 transition-all ${activeCharacterId === c.id ? 'bg-slate-100 text-primary border-primary/20' : 'bg-white border-slate-200 text-slate-500'}`}>
-                                                <img src={c.avatar} className="w-5 h-5 rounded-full object-cover" alt={c.name} />
+                                                {(c.displayAvatar || (c.avatar && (c.avatar.startsWith('data:') || c.avatar.startsWith('http') || c.avatar.startsWith('blob:')))) ? (
+                                                    <img
+                                                        src={c.displayAvatar || c.avatar}
+                                                        className="w-5 h-5 rounded-full object-cover"
+                                                        alt={c.name}
+                                                    />
+                                                ) : (
+                                                    <div className="w-5 h-5 rounded-full bg-slate-200 text-[10px] text-slate-500 flex items-center justify-center">
+                                                        {(c.nickname || c.name || 'A').slice(0, 1)}
+                                                    </div>
+                                                )}
                                                 {c.nickname || c.name}
                                             </button>
                                         ))}

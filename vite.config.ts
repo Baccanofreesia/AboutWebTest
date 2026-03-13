@@ -4,6 +4,20 @@ import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 
+const expandHome = (input: string) => {
+  if (!input) return input;
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  if (!home) return input;
+  let output = input;
+  if (output === '~') return home;
+  if (output.startsWith('~/') || output.startsWith('~\\')) {
+    output = path.join(home, output.slice(2));
+  }
+  output = output.replace(/^%USERPROFILE%/i, home);
+  output = output.replace(/^%HOME%/i, home);
+  return output;
+};
+
 function fsProxyPlugin() {
   return {
     name: 'fs-proxy',
@@ -16,26 +30,29 @@ function fsProxyPlugin() {
         req.on('end', async () => {
           try {
             const { action, rootPath, filePath, content, allowGlobal, newPath } = JSON.parse(body);
+            const safeRootPath = expandHome(rootPath || '');
+            const safeFilePath = expandHome(filePath || '');
+            const safeNewPath = expandHome(newPath || '');
 
             // If allowGlobal is true, filePath can be an absolute path anywhere on the disk.
             // If allowGlobal is false, filePath is treated as relative to rootPath.
             let fullPath = '';
 
             // Special Sandbox Routing: @agent_apps/
-            if (filePath.startsWith('@agent_apps/')) {
-              const relativeSubPath = filePath.replace('@agent_apps/', '');
+            if (safeFilePath.startsWith('@agent_apps/')) {
+              const relativeSubPath = safeFilePath.replace('@agent_apps/', '');
               fullPath = path.normalize(path.join(__dirname, 'apps', 'agent_apps', relativeSubPath));
               // Ensure it doesn't escape the sandbox
               if (!fullPath.startsWith(path.normalize(path.join(__dirname, 'apps', 'agent_apps')))) {
                 res.statusCode = 403;
                 return res.end(JSON.stringify({ error: 'Sandbox traversal detected' }));
               }
-            } else if (allowGlobal && path.isAbsolute(filePath)) {
-              fullPath = path.normalize(filePath);
+            } else if (allowGlobal && path.isAbsolute(safeFilePath)) {
+              fullPath = path.normalize(safeFilePath);
             } else {
-              fullPath = path.normalize(path.join(rootPath, filePath));
+              fullPath = path.normalize(path.join(safeRootPath, safeFilePath));
               // Security check: ensure the resolved path stays within the intended root
-              if (!fullPath.startsWith(path.normalize(rootPath))) {
+              if (!fullPath.startsWith(path.normalize(safeRootPath))) {
                 res.statusCode = 403;
                 return res.end(JSON.stringify({ error: 'Path traversal detected in sandboxed mode' }));
               }
@@ -86,24 +103,24 @@ function fsProxyPlugin() {
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({ success: true }));
             } else if (action === 'renameFile') {
-              if (!newPath || typeof newPath !== 'string') {
+              if (!safeNewPath || typeof safeNewPath !== 'string') {
                 res.statusCode = 400;
                 return res.end(JSON.stringify({ success: false, error: 'newPath is required' }));
               }
 
               let fullNewPath = '';
-              if (newPath.startsWith('@agent_apps/')) {
-                const relativeSubPath = newPath.replace('@agent_apps/', '');
+              if (safeNewPath.startsWith('@agent_apps/')) {
+                const relativeSubPath = safeNewPath.replace('@agent_apps/', '');
                 fullNewPath = path.normalize(path.join(__dirname, 'apps', 'agent_apps', relativeSubPath));
                 if (!fullNewPath.startsWith(path.normalize(path.join(__dirname, 'apps', 'agent_apps')))) {
                   res.statusCode = 403;
                   return res.end(JSON.stringify({ error: 'Sandbox traversal detected' }));
                 }
-              } else if (allowGlobal && path.isAbsolute(newPath)) {
-                fullNewPath = path.normalize(newPath);
+              } else if (allowGlobal && path.isAbsolute(safeNewPath)) {
+                fullNewPath = path.normalize(safeNewPath);
               } else {
-                fullNewPath = path.normalize(path.join(rootPath, newPath));
-                if (!fullNewPath.startsWith(path.normalize(rootPath))) {
+                fullNewPath = path.normalize(path.join(safeRootPath, safeNewPath));
+                if (!fullNewPath.startsWith(path.normalize(safeRootPath))) {
                   res.statusCode = 403;
                   return res.end(JSON.stringify({ error: 'Path traversal detected in sandboxed mode' }));
                 }

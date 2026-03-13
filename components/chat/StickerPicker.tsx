@@ -29,9 +29,12 @@ const StickerThumb: React.FC<{
     workspaceRootPath: string;
     onSelect: (item: StickerItem) => void;
     onDeleteFav?: (item: StickerItem) => void;
-    onCacheUpdate: (url: string) => void;
-}> = ({ item, workspaceRootPath, onSelect, onDeleteFav, onCacheUpdate }) => {
+    onDeleteItem?: (item: StickerItem) => void;
+    onCacheUpdate?: (item: StickerItem) => void;
+}> = ({ item, workspaceRootPath, onSelect, onDeleteFav, onDeleteItem, onCacheUpdate }) => {
     const src = useLocalSrc(item.url, workspaceRootPath);
+    const canDeleteFav = !!onDeleteFav && item.category === '收藏';
+    const canDeleteItem = !!onDeleteItem && item.category !== '收藏';
     return (
         <div className="flex flex-col gap-1.5 items-center">
             <button
@@ -43,9 +46,17 @@ const StickerThumb: React.FC<{
                 ) : (
                     <div className="w-full h-full rounded-lg bg-slate-100 animate-pulse" />
                 )}
-                {onDeleteFav && item.category === '收藏' && (
+                {(canDeleteFav || canDeleteItem) && (
                     <button
-                        onClick={(e) => { e.stopPropagation(); onDeleteFav(item); onCacheUpdate(item.url); }}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (canDeleteFav) {
+                                onDeleteFav?.(item);
+                                onCacheUpdate?.(item);
+                            } else if (canDeleteItem) {
+                                onDeleteItem?.(item);
+                            }
+                        }}
                         className="absolute top-0.5 right-0.5 w-5 h-5 bg-black/40 backdrop-blur-md text-white rounded-full hidden group-hover/btn:flex items-center justify-center hover:bg-red-500 transition-colors"
                     >
                         <span className="text-[12px] leading-none">×</span>
@@ -162,6 +173,7 @@ const StickerPicker: React.FC<StickerPickerProps> = ({ workspaceRootPath, onSele
     const fileInputRef = useRef<HTMLInputElement>(null);
     const cacheRef = useRef<Record<string, StickerItem[]>>({});
     const activeCategoryRef = useRef(activeCategory);
+    const categoryUpdatedAtRef = useRef<Record<string, number>>({});
 
     useEffect(() => { activeCategoryRef.current = activeCategory; }, [activeCategory]);
     useEffect(() => { cacheRef.current = cache; }, [cache]);
@@ -182,10 +194,23 @@ const StickerPicker: React.FC<StickerPickerProps> = ({ workspaceRootPath, onSele
         return () => clearInterval(timer);
     }, [refreshCategories]);
 
-    const loadCategory = useCallback(async (cat: string) => {
+    const getCategoryUpdatedAt = useCallback(async (cat: string) => {
+        if (!workspaceRootPath || cat === '收藏') return null;
+        try {
+            const items = await fsBridge.readDir(workspaceRootPath, 'stickers/', true);
+            const file = items.find(i => i.type === 'file' && i.name === `${cat}.txt`);
+            return file?.updatedAt || null;
+        } catch {
+            return null;
+        }
+    }, [workspaceRootPath]);
+
+    const loadCategory = useCallback(async (cat: string, opts?: { force?: boolean; resetSearch?: boolean }) => {
+        const force = !!opts?.force;
+        const resetSearch = opts?.resetSearch !== false;
         setActiveCategory(cat);
-        setSearchQuery(''); // 切 tab 时清搜索
-        if (cacheRef.current[cat]) return;
+        if (resetSearch) setSearchQuery(''); // 切 tab 时清搜索
+        if (!force && cacheRef.current[cat]) return;
         setLoading(true);
         try {
             const set = await StickerParser.loadStickerSet(workspaceRootPath, cat);
@@ -194,10 +219,12 @@ const StickerPicker: React.FC<StickerPickerProps> = ({ workspaceRootPath, onSele
                 cacheRef.current = next;
                 return next;
             });
+            const updatedAt = await getCategoryUpdatedAt(cat);
+            if (updatedAt) categoryUpdatedAtRef.current[cat] = updatedAt;
         } finally {
             setLoading(false);
         }
-    }, [workspaceRootPath]);
+    }, [workspaceRootPath, getCategoryUpdatedAt]);
 
     useEffect(() => {
         loadCategory('收藏');
@@ -246,6 +273,41 @@ const StickerPicker: React.FC<StickerPickerProps> = ({ workspaceRootPath, onSele
             if (activeCategoryRef.current === cat) await loadCategory('收藏');
         }
     };
+
+    const handleDeleteSticker = useCallback(async (item: StickerItem) => {
+        if (!workspaceRootPath) return;
+        if (item.category === '收藏') return;
+        if (!window.confirm(`确定要删除表情包 "${item.name}" 吗？该操作会同步移除分类文件中的这一行。`)) return;
+        const success = await StickerParser.deleteStickerItem(workspaceRootPath, item.category, item.url);
+        if (success) {
+            addToast('表情包已删除', 'success');
+            setCache(prev => {
+                const items = prev[item.category] || [];
+                const nextItems = items.filter(i => i.url !== item.url);
+                const next = { ...prev, [item.category]: nextItems };
+                cacheRef.current = next;
+                return next;
+            });
+        } else {
+            addToast('删除失败', 'error');
+        }
+    }, [workspaceRootPath, addToast]);
+
+    useEffect(() => {
+        if (!workspaceRootPath) return;
+        const timer = setInterval(async () => {
+            const cat = activeCategoryRef.current;
+            if (!cat || cat === '收藏') return;
+            const updatedAt = await getCategoryUpdatedAt(cat);
+            if (!updatedAt) return;
+            const prev = categoryUpdatedAtRef.current[cat] || 0;
+            if (updatedAt > prev) {
+                categoryUpdatedAtRef.current[cat] = updatedAt;
+                await loadCategory(cat, { force: true, resetSearch: false });
+            }
+        }, 3000);
+        return () => clearInterval(timer);
+    }, [workspaceRootPath, getCategoryUpdatedAt, loadCategory]);
 
     // 搜索过滤 — 在当前 tab 的缓存里做关键词匹配
     const allItems = cache[activeCategory] || [];
@@ -340,9 +402,10 @@ const StickerPicker: React.FC<StickerPickerProps> = ({ workspaceRootPath, onSele
                                 workspaceRootPath={workspaceRootPath}
                                 onSelect={onSelect}
                                 onDeleteFav={onDeleteFav}
-                                onCacheUpdate={(url) => {
+                                onDeleteItem={handleDeleteSticker}
+                                onCacheUpdate={(deleted) => {
                                     setCache(prev => {
-                                        const next = { ...prev, '收藏': prev['收藏']?.filter(i => i.url !== url) ?? [] };
+                                        const next = { ...prev, '收藏': prev['收藏']?.filter(i => i.url !== deleted.url) ?? [] };
                                         cacheRef.current = next;
                                         return next;
                                     });

@@ -12,11 +12,13 @@ import { SearchTool } from '../utils/searchTool';
 import { syncWorkspaceFromDisk } from '../utils/workspaceSync';
 import { DB } from '../utils/db';
 import { resolveApiEndpoint, API_SOURCE_REGISTRY, getHardcodedModels } from '../utils/apiResolver';
+import { workspaceFileExists } from '../utils/onboarding';
+import { AppID } from '../types';
 import type { ApiSource } from '../types';
 
 const Settings: React.FC = () => {
     const {
-        apiConfig, updateApiConfig, closeApp, availableModels, setAvailableModels,
+        apiConfig, updateApiConfig, closeApp, openApp, availableModels, setAvailableModels,
         exportSystem, importSystem, addToast, resetSystem,
         apiPresets, addApiPreset, removeApiPreset, userProfile, updateUserProfile,
         realtimeConfig, updateRealtimeConfig
@@ -31,6 +33,8 @@ const Settings: React.FC = () => {
     const [newPresetName, setNewPresetName] = useState('');
     const [showApiKey, setShowApiKey] = useState(false);
     const [localApiSource, setLocalApiSource] = useState<ApiSource>(apiConfig.apiSource || 'openai_compatible');
+    const [agentSoulExists, setAgentSoulExists] = useState<boolean | null>(null);
+    const [userProfileExists, setUserProfileExists] = useState<boolean | null>(null);
 
     // UI States
     const [showModelModal, setShowModelModal] = useState(false);
@@ -106,6 +110,30 @@ const Settings: React.FC = () => {
         setLocalFishUrl(apiConfig.fishSpeechBaseUrl || '');
         setLocalFishKey(apiConfig.fishSpeechApiKey || '');
     }, [apiConfig]);
+
+    useEffect(() => {
+        let cancelled = false;
+        const run = async () => {
+            if (!apiConfig.nativeWorkspacePath) {
+                if (!cancelled) {
+                    setAgentSoulExists(false);
+                    setUserProfileExists(false);
+                }
+                return;
+            }
+            const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+            const [agentExists, userExists] = await Promise.all([
+                workspaceFileExists(apiConfig.nativeWorkspacePath, 'Agent_Soul.md', allowGlobal),
+                workspaceFileExists(apiConfig.nativeWorkspacePath, 'USER.md', allowGlobal)
+            ]);
+            if (!cancelled) {
+                setAgentSoulExists(agentExists);
+                setUserProfileExists(userExists);
+            }
+        };
+        run();
+        return () => { cancelled = true; };
+    }, [apiConfig.nativeWorkspacePath, apiConfig.securityPolicy?.allowGlobalFileAccess]);
 
 
 
@@ -567,7 +595,7 @@ const Settings: React.FC = () => {
                 </section>
 
                 {/* 用户档案区域 */}
-                <section className="bg-white/60 backdrop-blur-sm rounded-3xl p-5 shadow-sm border border-white/50">
+                {/* <section className="bg-white/60 backdrop-blur-sm rounded-3xl p-5 shadow-sm border border-white/50">
                     <div className="flex items-center justify-between mb-4">
                         <div className="flex items-center gap-2">
                             <div className="p-2 bg-purple-100 rounded-xl text-purple-600">
@@ -588,7 +616,7 @@ const Settings: React.FC = () => {
                             <textarea value={userProfile.bio} onChange={(e) => updateUserProfile({ bio: e.target.value })} placeholder="设定你的角色或告诉 AI 关于你的一切..." className="w-full h-32 bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm text-slate-700 resize-none focus:bg-white transition-all" />
                         </div>
                     </div>
-                </section>
+                </section> */}
 
                 {/* AI 连接设置区域 */}
                 <section className="bg-white/60 backdrop-blur-sm rounded-3xl p-5 shadow-sm border border-white/50">
@@ -687,13 +715,32 @@ const Settings: React.FC = () => {
 
                         <div className="group pt-2">
                             <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">实体 Workspace 路径</label>
-                            <input type="text" value={localWorkspacePath} onChange={(e) => setLocalWorkspacePath(e.target.value)} placeholder="如: D:/MyWork/Mydevelop/MyBot" className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-xs font-mono focus:bg-white transition-all" />
+                            <input type="text" value={localWorkspacePath} onChange={(e) => setLocalWorkspacePath(e.target.value)} placeholder="例如: ~/NovaClaw/Workspace" className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-xs font-mono focus:bg-white transition-all" />
                         </div>
 
                         <div className="group pt-2">
                             <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">实体相册路径</label>
-                            <input type="text" value={localGalleryPath} onChange={(e) => setLocalGalleryPath(e.target.value)} placeholder="如: D:/MyWork/Mydevelop/MyBot/Photos" className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-xs font-mono focus:bg-white transition-all" />
+                            <input type="text" value={localGalleryPath} onChange={(e) => setLocalGalleryPath(e.target.value)} placeholder="例如: ~/NovaClaw/Gallery" className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-xs font-mono focus:bg-white transition-all" />
                             <p className="text-[10px] text-slate-400 mt-1.5 px-1">Gallery App 会直接映射此目录进行相册管理（增删改查与预览）。</p>
+                        </div>
+
+                        <div className="mt-3 p-3 rounded-xl border border-slate-200 bg-slate-50/80">
+                            <div className="flex items-center justify-between gap-3">
+                                <div>
+                                    <div className="text-xs font-bold text-slate-600">用户档案状态</div>
+                                    <div className="text-[10px] text-slate-400 mt-1">
+                                        Agent_Soul.md：{agentSoulExists === null ? '检测中' : agentSoulExists ? '已配置' : '未发现'}
+                                        <span className="mx-1">|</span>
+                                        USER.md：{userProfileExists === null ? '检测中' : userProfileExists ? '已配置' : '未发现'}
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => openApp(AppID.User)}
+                                    className="px-3 py-2 rounded-xl bg-white text-slate-600 text-[10px] font-bold border border-slate-200 hover:bg-slate-100"
+                                >
+                                    打开档案
+                                </button>
+                            </div>
                         </div>
 
                         {!Capacitor.isNativePlatform() && (

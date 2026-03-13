@@ -4,6 +4,8 @@ import { useOS } from '../context/OSContext';
 import { processImage } from '../utils/file';
 import { DB } from '../utils/db';
 import { fsBridge } from '../utils/fsBridge';
+import { AgentSoulData, buildAgentSoulMarkdown, buildUserMarkdownFromProfile, parseAgentSoulMarkdown, parseUserProfileMarkdown } from '../utils/profileFiles';
+import { workspaceFileExists } from '../utils/onboarding';
 import Modal from '../components/os/Modal';
 import { VoiceDesigner } from '../components/os/VoiceDesigner';
 
@@ -25,6 +27,8 @@ const UserApp: React.FC = () => {
     const { closeApp, userProfile, updateUserProfile, agent, updateAgent, addToast, apiConfig } = useOS();
     const [activeTab, setActiveTab] = useState<'user' | 'agent'>('user');
     const [userNicknameInput, setUserNicknameInput] = useState(userProfile.nickname || '');
+    const [userNameInput, setUserNameInput] = useState(userProfile.name || '');
+    const [userBioInput, setUserBioInput] = useState(userProfile.bio || '');
     const [agentNicknameInput, setAgentNicknameInput] = useState(agent?.nickname || '');
     const [showVoiceDesigner, setShowVoiceDesigner] = useState(false);
     const [showAvatarPicker, setShowAvatarPicker] = useState(false);
@@ -34,6 +38,8 @@ const UserApp: React.FC = () => {
     const [pickerSelectedPath, setPickerSelectedPath] = useState('');
     const [pickerPreviewMap, setPickerPreviewMap] = useState<Record<string, string>>({});
     const [pendingUpload, setPendingUpload] = useState<PendingAvatarUpload | null>(null);
+    const [userProfileFileExists, setUserProfileFileExists] = useState<boolean | null>(null);
+    const userMdUpdatedAtRef = useRef(0);
     const userFileRef = useRef<HTMLInputElement>(null);
     const agentFileRef = useRef<HTMLInputElement>(null);
     const galleryRootPath = apiConfig.galleryWorkspacePath?.trim() || '';
@@ -60,8 +66,99 @@ const UserApp: React.FC = () => {
     }, [userProfile.nickname]);
 
     useEffect(() => {
+        setUserNameInput(userProfile.name || '');
+        setUserBioInput(userProfile.bio || '');
+    }, [userProfile.name, userProfile.bio]);
+
+    useEffect(() => {
         setAgentNicknameInput(agent?.nickname || '');
     }, [agent?.nickname]);
+
+    useEffect(() => {
+        let cancelled = false;
+        const run = async () => {
+            if (!apiConfig.nativeWorkspacePath) {
+                if (!cancelled) setUserProfileFileExists(false);
+                return;
+            }
+            const exists = await workspaceFileExists(apiConfig.nativeWorkspacePath, 'USER.md', allowGlobal);
+            if (!cancelled) setUserProfileFileExists(exists);
+        };
+        run();
+        return () => { cancelled = true; };
+    }, [apiConfig.nativeWorkspacePath, allowGlobal]);
+
+    const isUserFormDirty = useCallback(() => {
+        const norm = (v?: string) => (v || '').trim();
+        return (
+            norm(userNameInput) !== norm(userProfile.name) ||
+            norm(userNicknameInput) !== norm(userProfile.nickname) ||
+            norm(userBioInput) !== norm(userProfile.bio)
+        );
+    }, [userBioInput, userNameInput, userNicknameInput, userProfile.bio, userProfile.name, userProfile.nickname]);
+
+    useEffect(() => {
+        if (!apiConfig.nativeWorkspacePath) return;
+        let cancelled = false;
+        const tick = async () => {
+            if (cancelled) return;
+            if (isUserFormDirty()) return;
+            try {
+                const items = await fsBridge.readDir(apiConfig.nativeWorkspacePath, '/', allowGlobal);
+                const file = items.find(i => i.type === 'file' && i.name === 'USER.md');
+                if (!file?.updatedAt) return;
+                if (file.updatedAt <= userMdUpdatedAtRef.current) return;
+                const content = await fsBridge.readFile(apiConfig.nativeWorkspacePath, 'USER.md', allowGlobal);
+                const parsed = parseUserProfileMarkdown(content);
+                userMdUpdatedAtRef.current = file.updatedAt;
+                if (!parsed) return;
+                await updateUserProfile({
+                    name: parsed.name || userProfile.name || 'User',
+                    nickname: parsed.nickname || undefined,
+                    bio: parsed.bio || undefined,
+                    avatar: parsed.avatar || userProfile.avatar
+                });
+            } catch { }
+        };
+        const timer = setInterval(tick, 3000);
+        tick();
+        return () => {
+            cancelled = true;
+            clearInterval(timer);
+        };
+    }, [allowGlobal, apiConfig.nativeWorkspacePath, isUserFormDirty, updateUserProfile, userProfile.avatar, userProfile.name]);
+
+    const writeUserProfileFile = useCallback(async (updates: Partial<{ name: string; nickname: string; avatar: string; bio: string }>) => {
+        if (!apiConfig.nativeWorkspacePath) return false;
+        const content = buildUserMarkdownFromProfile({
+            name: updates.name ?? userProfile.name ?? 'User',
+            nickname: updates.nickname ?? userProfile.nickname,
+            avatar: updates.avatar ?? userProfile.avatar,
+            bio: updates.bio ?? userProfile.bio
+        });
+        await fsBridge.writeFile(apiConfig.nativeWorkspacePath, 'USER.md', content, allowGlobal);
+        setUserProfileFileExists(true);
+        return true;
+    }, [allowGlobal, apiConfig.nativeWorkspacePath, userProfile.avatar, userProfile.bio, userProfile.name, userProfile.nickname]);
+
+    const writeAgentSoulFile = useCallback(async (updates: Partial<AgentSoulData>) => {
+        if (!apiConfig.nativeWorkspacePath || !agent) return false;
+        const root = apiConfig.nativeWorkspacePath;
+        let base: AgentSoulData = {
+            name: agent.name || 'Agent',
+            nickname: agent.nickname,
+            avatar: agent.avatar,
+            persona: agent.description
+        };
+        try {
+            const content = await fsBridge.readFile(root, 'Agent_Soul.md', allowGlobal);
+            const parsed = parseAgentSoulMarkdown(content);
+            if (parsed) base = { ...base, ...parsed };
+        } catch { }
+        const next: AgentSoulData = { ...base, ...updates, name: updates.name || base.name || 'Agent' };
+        await fsBridge.writeFile(root, 'Agent_Soul.md', buildAgentSoulMarkdown(next), allowGlobal);
+        return true;
+    }, [agent, allowGlobal, apiConfig.nativeWorkspacePath]);
 
     const collectGalleryPhotos = useCallback(async (): Promise<PickerPhoto[]> => {
         if (!galleryRootPath) return [];
@@ -133,15 +230,27 @@ const UserApp: React.FC = () => {
         };
     }, [allowGlobal, galleryRootPath, pickerPhotos, pickerPreviewMap, showAvatarPicker]);
 
-    const applyAvatar = useCallback(async (target: AvatarTarget, dataUrl: string, summary: string) => {
+    const applyAvatar = useCallback(async (target: AvatarTarget, dataUrl: string, summary: string, avatarPath?: string) => {
         if (target === 'user') {
-            await updateUserProfile({ displayAvatar: dataUrl });
+            const nextAvatar = avatarPath || userProfile.avatar;
+            await updateUserProfile({ avatar: nextAvatar, displayAvatar: dataUrl });
             await DB.saveRelationEvent({ type: 'user_avatar_changed', actor: 'user', summary });
+            try {
+                await writeUserProfileFile({ avatar: nextAvatar });
+            } catch (e: any) {
+                addToast(e.message || '写入 USER.md 失败', 'error');
+            }
         } else if (agent) {
-            await updateAgent({ displayAvatar: dataUrl });
+            const nextAvatar = avatarPath || agent.avatar;
+            await updateAgent({ avatar: nextAvatar, displayAvatar: dataUrl });
             await DB.saveRelationEvent({ type: 'agent_avatar_changed', actor: 'user', summary });
+            try {
+                await writeAgentSoulFile({ avatar: nextAvatar });
+            } catch (e: any) {
+                addToast(e.message || '写入 Agent_Soul.md 失败', 'error');
+            }
         }
-    }, [agent, updateAgent, updateUserProfile]);
+    }, [addToast, agent, updateAgent, updateUserProfile, userProfile.avatar, writeAgentSoulFile, writeUserProfileFile]);
 
     const openAvatarPicker = useCallback(async (target: AvatarTarget) => {
         setAvatarPickerTarget(target);
@@ -159,7 +268,7 @@ const UserApp: React.FC = () => {
         try {
             const dataUrl = await loadPhotoDataUrl(photo);
             if (!dataUrl) throw new Error('读取图片失败');
-            await applyAvatar(avatarPickerTarget, dataUrl, `用户从相册设置了${avatarPickerTarget === 'user' ? '用户' : 'Agent'}头像: ${photo.name}`);
+            await applyAvatar(avatarPickerTarget, dataUrl, `用户从相册设置了${avatarPickerTarget === 'user' ? '用户' : 'Agent'}头像: ${photo.name}`, photo.path);
             addToast('头像已更新', 'success');
             setShowAvatarPicker(false);
         } catch (e: any) {
@@ -182,7 +291,7 @@ const UserApp: React.FC = () => {
             const duplicate = photos.find(p => p.name.trim().toLowerCase() === safeName.trim().toLowerCase());
             if (duplicate) {
                 const duplicateDataUrl = await loadPhotoDataUrl(duplicate);
-                await applyAvatar(target, duplicateDataUrl, `用户复用了相册已有图片设置${target === 'user' ? '用户' : 'Agent'}头像: ${safeName}`);
+                await applyAvatar(target, duplicateDataUrl, `用户复用了相册已有图片设置${target === 'user' ? '用户' : 'Agent'}头像: ${safeName}`, duplicate.path);
                 addToast('检测到相册同名图片，已复用', 'success');
                 setShowAvatarPicker(false);
                 return;
@@ -214,7 +323,7 @@ const UserApp: React.FC = () => {
                 source: 'user',
                 relatedPath: relPath
             });
-            await applyAvatar(pendingUpload.target, pendingUpload.dataUrl, `用户上传新图并设置${pendingUpload.target === 'user' ? '用户' : 'Agent'}头像: ${pendingUpload.safeName}`);
+            await applyAvatar(pendingUpload.target, pendingUpload.dataUrl, `用户上传新图并设置${pendingUpload.target === 'user' ? '用户' : 'Agent'}头像: ${pendingUpload.safeName}`, relPath);
             addToast('头像已更新并保存到相册', 'success');
             setPendingUpload(null);
             setShowAvatarPicker(false);
@@ -222,6 +331,28 @@ const UserApp: React.FC = () => {
             addToast(e.message || '保存头像失败', 'error');
         }
     }, [addToast, allowGlobal, applyAvatar, galleryRootPath, pendingUpload]);
+
+    const commitUserProfileDetails = useCallback(async () => {
+        const nextName = userNameInput.trim() || userProfile.name || 'User';
+        const nextBio = userBioInput.trim();
+        await updateUserProfile({ name: nextName, bio: nextBio });
+        if (!apiConfig.nativeWorkspacePath) {
+            addToast('未配置工作区路径，无法写入 USER.md', 'error');
+            return;
+        }
+        try {
+            await writeUserProfileFile({
+                name: nextName,
+                nickname: userNicknameInput.trim(),
+                avatar: userProfile.avatar,
+                bio: nextBio
+            });
+            setUserProfileFileExists(true);
+            addToast('USER.md 已更新', 'success');
+        } catch (e: any) {
+            addToast(e.message || '写入 USER.md 失败', 'error');
+        }
+    }, [addToast, apiConfig.nativeWorkspacePath, updateUserProfile, userBioInput, userNameInput, userNicknameInput, userProfile.avatar, userProfile.name, writeUserProfileFile]);
 
     const commitUserNickname = useCallback(async () => {
         const next = userNicknameInput.trim();
@@ -232,8 +363,13 @@ const UserApp: React.FC = () => {
             actor: 'user',
             summary: `用户将聊天昵称更新为「${next || userProfile.name}」`
         });
+        try {
+            await writeUserProfileFile({ nickname: next || undefined });
+        } catch (e: any) {
+            addToast(e.message || '写入 USER.md 失败', 'error');
+        }
         addToast('昵称已更新', 'success');
-    }, [addToast, updateUserProfile, userNicknameInput, userProfile.name, userProfile.nickname]);
+    }, [addToast, updateUserProfile, userNicknameInput, userProfile.name, userProfile.nickname, writeUserProfileFile]);
 
     const commitAgentNickname = useCallback(async () => {
         if (!agent) return;
@@ -245,8 +381,13 @@ const UserApp: React.FC = () => {
             actor: 'user',
             summary: `用户将 Agent 聊天昵称更新为「${next || agent.name}」`
         });
+        try {
+            await writeAgentSoulFile({ nickname: next || undefined });
+        } catch (e: any) {
+            addToast(e.message || '写入 Agent_Soul.md 失败', 'error');
+        }
         addToast('昵称已更新', 'success');
-    }, [addToast, agent, agentNicknameInput, updateAgent]);
+    }, [addToast, agent, agentNicknameInput, updateAgent, writeAgentSoulFile]);
 
     const tabs = [
         { id: 'user' as const, label: '👤 我的资料', color: 'from-blue-400 to-indigo-500' },
@@ -272,8 +413,8 @@ const UserApp: React.FC = () => {
                         key={tab.id}
                         onClick={() => setActiveTab(tab.id)}
                         className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all ${activeTab === tab.id
-                                ? `bg-gradient-to-r ${tab.color} text-white shadow-md`
-                                : 'bg-white/70 text-slate-500 hover:bg-slate-100'
+                            ? `bg-gradient-to-r ${tab.color} text-white shadow-md`
+                            : 'bg-white/70 text-slate-500 hover:bg-slate-100'
                             }`}
                     >
                         {tab.label}
@@ -321,9 +462,39 @@ const UserApp: React.FC = () => {
                                 />
                                 <button onClick={commitUserNickname} className="mt-2 w-full py-2 rounded-xl bg-slate-100 text-slate-600 text-xs font-bold">保存昵称</button>
                                 <p className="text-[10px] text-slate-400 text-center mt-3">这是在聊天界面显示的称呼，不必填写真实姓名。</p>
-                                <p className="text-[10px] text-primary text-center mt-1 cursor-pointer hover:underline" onClick={() => {
-                                    closeApp();
-                                }}>编辑详细个人档案 &gt;</p>
+                                <p className="text-[10px] text-slate-400 text-center mt-1">用户档案已集成在本页</p>
+                            </div>
+                            <div className="w-full mt-2 p-4 bg-white/80 rounded-2xl border border-slate-100 shadow-sm space-y-3">
+                                <div>
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">用户名称</label>
+                                    <input
+                                        value={userNameInput}
+                                        onChange={(e) => setUserNameInput(e.target.value)}
+                                        placeholder="请填写您的姓名"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-700 focus:border-primary outline-none"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">人设/备注</label>
+                                    <textarea
+                                        value={userBioInput}
+                                        onChange={(e) => setUserBioInput(e.target.value)}
+                                        rows={3}
+                                        placeholder="描述偏好、习惯、原则等"
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 focus:border-primary outline-none"
+                                    />
+                                </div>
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="text-[10px] text-slate-400">
+                                        USER.md：{userProfileFileExists === null ? '检测中' : userProfileFileExists ? '已配置' : '未发现'}
+                                    </span>
+                                    <button
+                                        onClick={commitUserProfileDetails}
+                                        className="px-3 py-2 rounded-xl bg-slate-100 text-slate-600 text-[10px] font-bold"
+                                    >
+                                        同步到档案
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </>
@@ -382,7 +553,7 @@ const UserApp: React.FC = () => {
                                     <p className="text-[10px] text-slate-400 mt-1">{agent.description?.slice(0, 80)}...</p>
                                 </div>
                                 <div className="pt-3 border-t border-violet-100 flex justify-center">
-                                    <button 
+                                    <button
                                         onClick={() => setShowVoiceDesigner(true)}
                                         className="w-full py-2.5 rounded-xl bg-violet-100 text-violet-700 hover:bg-violet-200 active:scale-95 transition-all text-xs font-bold flex items-center justify-center gap-2"
                                     >

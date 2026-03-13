@@ -1,6 +1,6 @@
 
 
-import React, { useEffect, ErrorInfo } from 'react';
+import React, { useEffect, ErrorInfo, useState, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import StatusBar from './os/StatusBar';
@@ -23,6 +23,8 @@ import { AppID } from '../types';
 import { App as CapApp } from '@capacitor/app';
 import { StatusBar as CapStatusBar } from '@capacitor/status-bar';
 import { LocalNotifications } from '@capacitor/local-notifications';
+import ProfileOnboarding from './os/ProfileOnboarding';
+import { needsProfileOnboarding } from '../utils/onboarding';
 
 // --- Dynamic Agent Apps Registry ---
 const agentModules = (import.meta as any).glob('../apps/agent_apps/*.tsx');
@@ -36,7 +38,7 @@ for (const path in agentModules) {
 console.log("PhoneShell loaded AgentAppMap with keys:", Object.keys(AgentAppMap));
 
 // --- Agent App Error Boundary ---
-class AgentErrorBoundary extends React.Component<{ appName: string, onCloseApp: () => void, children: React.ReactNode }, { hasError: boolean, errorMessage: string }> {
+class AgentErrorBoundary extends React.Component<{ appName: string, agentName?: string, onCloseApp: () => void, children: React.ReactNode }, { hasError: boolean, errorMessage: string }> {
   constructor(props: any) {
     super(props);
     this.state = { hasError: false, errorMessage: '' };
@@ -74,7 +76,7 @@ class AgentErrorBoundary extends React.Component<{ appName: string, onCloseApp: 
             <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
           </div>
           <h2 className="text-xl font-bold text-slate-800 mb-2">{this.props.appName} 崩溃了</h2>
-          <p className="text-xs text-slate-500 text-center mb-6">Nova 已经收到崩溃报告，正在抢修中...</p>
+          <p className="text-xs text-slate-500 text-center mb-6">{this.props.agentName || 'Agent'} 已经收到崩溃报告，正在抢修中...</p>
           <div className="bg-white p-3 rounded-lg border border-red-100 w-full max-h-32 overflow-y-auto mb-6">
             <pre className="text-[10px] text-red-500 font-mono whitespace-pre-wrap">{this.state.errorMessage}</pre>
           </div>
@@ -121,7 +123,14 @@ const CheckPhonePlaceholder: React.FC = () => {
 };
 
 const PhoneShell: React.FC = () => {
-  const { theme, isLocked, unlock, activeApp, closeApp, virtualTime, isDataLoaded, toasts } = useOS();
+  const { theme, isLocked, unlock, activeApp, closeApp, virtualTime, isDataLoaded, toasts, apiConfig, agent } = useOS();
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [booting, setBooting] = useState(false);
+  const [bootProgress, setBootProgress] = useState(0);
+  const [lockBooting, setLockBooting] = useState(false);
+  const [lockBootProgress, setLockBootProgress] = useState(0);
+  const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unlockIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Capacitor Native Handling
   useEffect(() => {
@@ -167,9 +176,115 @@ const PhoneShell: React.FC = () => {
     };
   }, [activeApp, isLocked, closeApp]);
 
-  if (!isDataLoaded) {
-    return <div className="w-full h-full bg-black flex items-center justify-center"><div className="w-8 h-8 border-2 border-white/20 border-t-white rounded-full animate-spin"></div></div>;
-  }
+  useEffect(() => {
+    if (isLocked || !isDataLoaded) {
+      setBooting(false);
+      setBootProgress(0);
+      return;
+    }
+    if (showOnboarding) {
+      setBooting(false);
+      return;
+    }
+    let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    let completeTimeout: ReturnType<typeof setTimeout> | null = null;
+    let safetyTimeout: ReturnType<typeof setTimeout> | null = null;
+    const run = async () => {
+      const useOverlay = false;
+      if (useOverlay) {
+        setBooting(true);
+        setBootProgress(8);
+        let progress = 8;
+        intervalId = setInterval(() => {
+          progress = Math.min(88, progress + Math.max(1, Math.round((88 - progress) / 5)));
+          setBootProgress(progress);
+        }, 140);
+        safetyTimeout = setTimeout(() => {
+          if (cancelled) return;
+          setBootProgress(100);
+          setBooting(false);
+          setShowOnboarding(true);
+        }, 6000);
+      } else {
+        setBooting(false);
+        setBootProgress(0);
+      }
+      try {
+        const needs = await needsProfileOnboarding(apiConfig);
+        if (cancelled) return;
+        if (!needs) {
+          if (intervalId) clearInterval(intervalId);
+          if (safetyTimeout) clearTimeout(safetyTimeout);
+          setShowOnboarding(false);
+          setBooting(false);
+          setBootProgress(0);
+          return;
+        }
+        if (intervalId) clearInterval(intervalId);
+        if (safetyTimeout) clearTimeout(safetyTimeout);
+        if (useOverlay) {
+          setBootProgress(100);
+          completeTimeout = setTimeout(() => {
+            if (cancelled) return;
+            setBooting(false);
+            setShowOnboarding(true);
+          }, 240);
+        } else {
+          setShowOnboarding(true);
+        }
+      } catch (e) {
+        if (intervalId) clearInterval(intervalId);
+        if (safetyTimeout) clearTimeout(safetyTimeout);
+        if (useOverlay) {
+          setBootProgress(100);
+          completeTimeout = setTimeout(() => {
+            if (cancelled) return;
+            setBooting(false);
+            setShowOnboarding(true);
+          }, 240);
+        } else {
+          setShowOnboarding(true);
+        }
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+      if (completeTimeout) clearTimeout(completeTimeout);
+      if (safetyTimeout) clearTimeout(safetyTimeout);
+    };
+  }, [apiConfig, isDataLoaded, isLocked, showOnboarding]);
+
+  useEffect(() => {
+    return () => {
+      if (unlockIntervalRef.current) clearInterval(unlockIntervalRef.current);
+      if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
+    };
+  }, []);
+
+  const beginUnlock = () => {
+    if (!isDataLoaded) return;
+    if (lockBooting) return;
+    setLockBooting(true);
+    setLockBootProgress(8);
+    const duration = 1000 + Math.round(Math.random() * 1000);
+    const start = Date.now();
+    if (unlockIntervalRef.current) clearInterval(unlockIntervalRef.current);
+    if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
+    unlockIntervalRef.current = setInterval(() => {
+      const elapsed = Date.now() - start;
+      const ratio = Math.min(0.92, elapsed / duration);
+      setLockBootProgress(Math.max(8, Math.round(ratio * 100)));
+    }, 120);
+    unlockTimerRef.current = setTimeout(() => {
+      if (unlockIntervalRef.current) clearInterval(unlockIntervalRef.current);
+      setLockBootProgress(100);
+      setLockBooting(false);
+      unlock();
+    }, duration);
+  };
 
   const getBgStyle = (wp: unknown) => {
     const safeWp = typeof wp === 'string' && wp.trim() ? wp : '#0f172a';
@@ -184,7 +299,7 @@ const PhoneShell: React.FC = () => {
   if (isLocked) {
     return (
       <div
-        onClick={unlock}
+        onClick={beginUnlock}
         className="relative w-full h-full bg-cover bg-center cursor-pointer overflow-hidden group font-light select-none"
         style={{ backgroundImage: bgImageValue, color: contentColor }}
       >
@@ -199,6 +314,37 @@ const PhoneShell: React.FC = () => {
           <div className="w-1 h-8 rounded-full bg-gradient-to-b from-transparent to-current"></div>
           <span className="text-[10px] tracking-widest uppercase font-semibold">Tap to Unlock</span>
         </div>
+        {!isDataLoaded && (
+          <div className="absolute bottom-5 w-full flex justify-center">
+            <div className="px-3 py-1.5 rounded-full text-[10px] tracking-widest uppercase bg-black/40 text-white/80 backdrop-blur-md border border-white/10">
+              Syncing...
+            </div>
+          </div>
+        )}
+        {lockBooting && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+            <div className="relative w-[82%] max-w-[340px] rounded-[28px] border border-white/12 bg-[linear-gradient(180deg,rgba(16,16,16,0.85),rgba(8,8,8,0.9))] shadow-[0_0_40px_rgba(0,0,0,0.35)] backdrop-blur-2xl px-6 py-6 text-white overflow-hidden">
+              <div className="pointer-events-none absolute inset-0 opacity-[0.15] bg-[linear-gradient(90deg,rgba(255,255,255,0.08)_1px,transparent_1px),linear-gradient(180deg,rgba(255,255,255,0.06)_1px,transparent_1px)] bg-[size:16px_16px]" />
+              <div className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-[linear-gradient(180deg,rgba(255,255,255,0.12),transparent)]" />
+
+              <div className="flex items-center justify-between text-[10px] tracking-[0.35em] uppercase opacity-70">
+                <span>Unlocking</span>
+                <span className="tabular-nums">{lockBootProgress}%</span>
+              </div>
+              <div className="mt-2 text-lg font-semibold tracking-wide">准备进入</div>
+              <div className="mt-4 h-2 rounded-full bg-white/10 overflow-hidden">
+                <div
+                  className="h-full bg-[linear-gradient(90deg,rgba(255,255,255,0.35),rgba(255,255,255,0.85),rgba(255,255,255,0.35))] transition-all duration-150"
+                  style={{ width: `${lockBootProgress}%` }}
+                />
+              </div>
+              <div className="mt-3 flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-white/60">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-white/40 animate-pulse" />
+                安全校验中
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -226,7 +372,7 @@ const PhoneShell: React.FC = () => {
           const TargetAgentApp = AgentAppMap[activeApp as string];
           return (
             <React.Suspense fallback={<div className="flex w-full h-full items-center justify-center bg-slate-900"><div className="text-white/60 animate-pulse text-sm font-bold tracking-widest uppercase">Booting Agent App...</div></div>}>
-              <AgentErrorBoundary appName={activeApp as string} onCloseApp={closeApp}>
+              <AgentErrorBoundary appName={activeApp as string} agentName={agent?.name} onCloseApp={closeApp}>
                 <AgentAppWrapper appName={activeApp as string} onClose={closeApp}>
                   <TargetAgentApp />
                 </AgentAppWrapper>
@@ -286,6 +432,16 @@ const PhoneShell: React.FC = () => {
           </div>
         ))}
       </div>
+
+      {booting && null}
+
+      <ProfileOnboarding
+        isOpen={showOnboarding}
+        onComplete={() => {
+          localStorage.setItem('os_profile_setup_v1', 'true');
+          setShowOnboarding(false);
+        }}
+      />
     </div>
   );
 };
