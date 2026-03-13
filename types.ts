@@ -73,9 +73,11 @@ export interface OSTheme {
 // --- API Config ---
 
 export type ApiSource =
-    | 'openai_compatible'  // Default: universal OpenAI-format proxy (e.g. OneAPI, NewAPI)
-    | 'volcengine'         // 火山引擎方舟 (ARK) official
-    | 'minimax'            // MiniMax official
+    | 'openai_compatible'  // Default: universal OpenAI-format proxy
+    | 'volcengine'         // 火山引擎方舟 在线推理（ep-xxxx）
+    | 'volcengine_coding'  // 火山引擎方舟 Coding Plan（模型名直传）
+    | 'minimax'            // MiniMax 按量付费
+    | 'minimax_coding'     // MiniMax Coding Plan（Anthropic 协议）
     | 'gemini'             // Google Gemini native
     | 'deepseek'           // DeepSeek official
     | 'moonshot';          // Moonshot/Kimi official

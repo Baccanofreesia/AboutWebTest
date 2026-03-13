@@ -76,6 +76,27 @@ export const useChatAI = ({
         const days = Math.floor(diffHours / 24);
         return `[系统提示: 距离上一条消息: ${days} 天。消失很久。]`;
     };
+    function extractDeltaText(line: string): string {
+        if (!line.startsWith('data: ')) return '';
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') return '';
+        try {
+            const data = JSON.parse(raw);
+            // OpenAI 格式: choices[0].delta.content
+            if (data.choices?.[0]?.delta?.content) {
+                return data.choices[0].delta.content;
+            }
+            // Anthropic 格式: type=content_block_delta, delta.type=text_delta
+            if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta') {
+                return data.delta.text || '';
+            }
+            // Anthropic 格式（部分实现）: delta.text 直接在顶层
+            if (data.delta?.text) {
+                return data.delta.text;
+            }
+        } catch (_) { }
+        return '';
+    }
 
     const triggerAI = async (currentMsgs: Message[], voiceActiveOverride?: boolean, proactiveVoiceAllowed?: boolean) => {
         if (isTyping || !char || !apiConfig.baseUrl) return;
@@ -374,19 +395,28 @@ export const useChatAI = ({
                     const { done, value } = await reader.read();
                     if (done) break;
                     const chunk = decoder.decode(value, { stream: true });
-                    const lines = chunk.split('\n');
-                    for (const line of lines) {
+                    for (const line of chunk.split('\n')) {
                         if (line.trim() === 'data: [DONE]') break;
-                        if (line.startsWith('data: ')) {
-                            try {
-                                const data = JSON.parse(line.slice(6));
-                                if (data.choices?.[0]?.delta?.content) {
-                                    aiContent += data.choices[0].delta.content;
-                                }
-                            } catch (e) { }
-                        }
+                        const delta = extractDeltaText(line);
+                        if (delta) aiContent += delta;
                     }
                 }
+                //     const { done, value } = await reader.read();
+                //     if (done) break;
+                //     const chunk = decoder.decode(value, { stream: true });
+                //     const lines = chunk.split('\n');
+                //     for (const line of lines) {
+                //         if (line.trim() === 'data: [DONE]') break;
+                //         if (line.startsWith('data: ')) {
+                //             try {
+                //                 const data = JSON.parse(line.slice(6));
+                //                 if (data.choices?.[0]?.delta?.content) {
+                //                     aiContent += data.choices[0].delta.content;
+                //                 }
+                //             } catch (e) { }
+                //         }
+                //     }
+                // }
             } finally {
                 reader.releaseLock();
             }
@@ -425,15 +455,28 @@ export const useChatAI = ({
                             const chunk = decoder.decode(value, { stream: true });
                             for (const line of chunk.split('\n')) {
                                 if (line.trim() === 'data: [DONE]') break;
-                                if (line.startsWith('data: ')) {
-                                    try {
-                                        const data = JSON.parse(line.slice(6));
-                                        if (data.choices?.[0]?.delta?.content) recallContent += data.choices[0].delta.content;
-                                    } catch (e) { }
-                                }
+                                const delta = extractDeltaText(line);
+                                if (delta) recallContent += delta;
                             }
                         }
                         rReader.releaseLock();
+                        // const rReader = recallRes.body.getReader();
+                        // let recallContent = '';
+                        // while (true) {
+                        //     const { done, value } = await rReader.read();
+                        //     if (done) break;
+                        //     const chunk = decoder.decode(value, { stream: true });
+                        //     for (const line of chunk.split('\n')) {
+                        //         if (line.trim() === 'data: [DONE]') break;
+                        //         if (line.startsWith('data: ')) {
+                        //             try {
+                        //                 const data = JSON.parse(line.slice(6));
+                        //                 if (data.choices?.[0]?.delta?.content) recallContent += data.choices[0].delta.content;
+                        //             } catch (e) { }
+                        //         }
+                        //     }
+                        // }
+                        // rReader.releaseLock();
                         if (recallContent) {
                             aiContent = recallContent.replace(/\[\s*\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}.*?\]/g, '').replace(/^[\w\u4e00-\u9fa5]+:\s*/, '').replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
                         }

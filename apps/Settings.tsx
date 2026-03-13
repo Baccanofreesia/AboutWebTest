@@ -11,7 +11,7 @@ import { XhsMcpClient } from '../utils/xhsMcpClient';
 import { SearchTool } from '../utils/searchTool';
 import { syncWorkspaceFromDisk } from '../utils/workspaceSync';
 import { DB } from '../utils/db';
-import { resolveApiEndpoint, API_SOURCE_REGISTRY } from '../utils/apiResolver';
+import { resolveApiEndpoint, API_SOURCE_REGISTRY, getHardcodedModels } from '../utils/apiResolver';
 import type { ApiSource } from '../types';
 
 const Settings: React.FC = () => {
@@ -129,6 +129,7 @@ const Settings: React.FC = () => {
             baseUrl: localUrl,
             apiKey: localKey,
             model: localModel,
+            apiSource: localApiSource,
             videoUnderstanding: {
                 maxFrames: videoMaxFrames,
                 providerMode: videoProviderMode,
@@ -203,6 +204,14 @@ const Settings: React.FC = () => {
     };
 
     const fetchModels = async () => {
+        const hardcoded = getHardcodedModels(localApiSource);
+        if (hardcoded) {
+            setAvailableModels(hardcoded);
+            if (!hardcoded.includes(localModel)) setLocalModel(hardcoded[0]);
+            setStatusMsg(`已加载 ${hardcoded.length} 个内置模型`);
+            setShowModelModal(true);
+            return;
+        }
         if (!localUrl) { setStatusMsg('请先填写 URL'); return; }
         setIsLoadingModels(true);
         setStatusMsg('正在连接...');

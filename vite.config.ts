@@ -204,6 +204,12 @@ export default defineConfig({
           'Referer': 'https://ark.cn-beijing.volces.com'
         }
       },
+      '/api/proxy/minimax-coding': {
+        target: 'https://api.minimaxi.com',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (p: string) => p.replace(/^\/api\/proxy\/minimax-coding/, ''),
+      },
       '/api/minimax/t2a': {
         target: 'https://api.minimaxi.com',
         changeOrigin: true,
