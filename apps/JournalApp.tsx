@@ -7,6 +7,7 @@ import { CharacterProfile, DiaryEntry, StickerData, MemoryFragment, DiaryPage } 
 import { ContextBuilder } from '../utils/context';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
+import { resolveApiEndpoint } from '../utils/apiResolver';
 
 // --- Assets & Constants ---
 
@@ -287,17 +288,20 @@ Structure:
   "stickers": ["sticker1", "http://custom-sticker-url..."] (从默认列表: ${defaultStickers} 或 Custom Stickers 中选0-3个)
 }`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
+            const resolved = resolveApiEndpoint(apiConfig);
+            let requestBody: any = {
                     model: apiConfig.model,
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: `Users Diary:\n${currentEntry.userPage.text}` }
                     ],
                     temperature: 0.85
-                })
+                };
+            if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
+            const response = await fetch(resolved.chatUrl, {
+                method: 'POST',
+                headers: resolved.headers,
+                body: JSON.stringify(requestBody)
             });
 
             if (!response.ok) throw new Error('API Error');
@@ -352,14 +356,17 @@ Structure:
             
             Output: 一句简短的总结 (中文)。`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
+            const resolved2 = resolveApiEndpoint(apiConfig);
+            let archiveBody: any = {
                     model: apiConfig.model,
                     messages: [{ role: "user", content: prompt }],
                     temperature: 0.3
-                })
+                };
+            if (resolved2.transformBody) archiveBody = resolved2.transformBody(archiveBody);
+            const response = await fetch(resolved2.chatUrl, {
+                method: 'POST',
+                headers: resolved2.headers,
+                body: JSON.stringify(archiveBody)
             });
 
             if (response.ok) {

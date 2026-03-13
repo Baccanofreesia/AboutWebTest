@@ -22,6 +22,12 @@ export enum AppID {
     Browser = 'browser',        // Future: AI search/browse
 }
 
+export interface StickerUsageRecord {
+    name: string;       // sticker name (key)
+    count: number;      // total send count
+    lastUsedAt: number; // timestamp of last use
+}
+
 // --- Message Types ---
 
 export type MessageType = 'text' | 'transfer' | 'interaction' | 'voice' | 'emoji' | 'image' | 'video' | 'xhs_card' | 'file';
@@ -66,7 +72,16 @@ export interface OSTheme {
 
 // --- API Config ---
 
+export type ApiSource =
+    | 'openai_compatible'  // Default: universal OpenAI-format proxy (e.g. OneAPI, NewAPI)
+    | 'volcengine'         // 火山引擎方舟 (ARK) official
+    | 'minimax'            // MiniMax official
+    | 'gemini'             // Google Gemini native
+    | 'deepseek'           // DeepSeek official
+    | 'moonshot';          // Moonshot/Kimi official
+
 export interface APIConfig {
+    apiSource?: ApiSource; // defaults to 'openai_compatible' if undefined
     baseUrl: string;
     apiKey: string;
     model: string;
@@ -234,7 +249,10 @@ export interface AgentProfile {
     chatVoiceEnabled?: boolean;             // Double-layer control switch
     chatVoiceLang?: string;                 // Target language for voice replies
     voiceProfile?: {
+        provider?: 'minimax' | 'fish_speech';
         voiceId: string;                    // Fish Speech reference ID or MiniMax voice ID
+        voiceName?: string;
+        source?: 'custom' | 'preset';
         model?: string;
         speed?: number;
         vol?: number;
@@ -242,6 +260,7 @@ export interface AgentProfile {
         emotion?: string;
         timberWeights?: { voice_id: string; weight: number }[];
         voiceModify?: { pitch?: number; intensity?: number; timbre?: number; sound_effects?: string };
+        notes?: string;
     };
 
     // DateApp / Visual Novel assets (preserved for future video call)
@@ -338,7 +357,7 @@ export interface ImageDetail {
 
 export interface RelationEvent {
     id: string;
-    type: 'user_nickname_changed' | 'agent_nickname_changed' | 'user_avatar_changed' | 'agent_avatar_changed' | 'couple_avatar_set' | 'agent_gallery_upload' | 'agent_gallery_send' | 'agent_file_send' | 'agent_voice_send';
+    type: 'user_nickname_changed' | 'agent_nickname_changed' | 'user_avatar_changed' | 'agent_avatar_changed' | 'couple_avatar_set' | 'agent_gallery_upload' | 'agent_gallery_send' | 'agent_file_send' | 'agent_voice_send' | 'agent_sticker_send' | 'user_sticker_send';
     actor: 'user' | 'agent' | 'system';
     summary: string;
     payload?: Record<string, any>;

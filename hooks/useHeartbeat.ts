@@ -10,11 +10,12 @@
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { HeartbeatConfig } from '../types';
+import { HeartbeatConfig, APIConfig } from '../types';
+import { resolveApiEndpoint } from '../utils/apiResolver';
 
 export interface UseHeartbeatOptions {
     config: HeartbeatConfig;
-    apiConfig: { baseUrl: string; apiKey: string; model: string };
+    apiConfig: APIConfig;
     agentName: string;
     userName: string;
     lastMsgTimestamp: number | undefined;
@@ -52,15 +53,18 @@ export function useHeartbeat(opts: UseHeartbeatOptions) {
                 .replace(/\{userName\}/g, userName)
                 .replace(/\{time\}/g, now.toLocaleString());
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
+            const resolved = resolveApiEndpoint(apiConfig);
+            let requestBody: any = {
                     model: apiConfig.model,
                     messages: [{ role: 'user', content: prompt }],
                     temperature: 0.6,
                     max_tokens: 200,
-                }),
+                };
+            if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
+            const response = await fetch(resolved.chatUrl, {
+                method: 'POST',
+                headers: resolved.headers,
+                body: JSON.stringify(requestBody),
             });
 
             if (response.ok) {

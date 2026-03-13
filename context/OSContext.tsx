@@ -5,6 +5,7 @@ import { DB } from '../utils/db';
 import { fsBridge } from '../utils/fsBridge';
 import { RealtimeConfig, defaultRealtimeConfig } from '../utils/realtimeContext';
 import { ContextEnhancer } from '../utils/contextEnhancer';
+import { resolveApiEndpoint } from '../utils/apiResolver';
 
 // ============================================
 // NovaClaw OS Context — Single Agent Architecture
@@ -561,7 +562,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             throw new Error("Agent or API Config not ready");
         }
 
-        const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey || 'sk-none'}` };
+        const resolved = resolveApiEndpoint(apiConfig);
 
         let basePrompt = `You are ${agent.name}. ${agent.description}\n\n`;
         const perceptionBlock = await ContextEnhancer.buildSnapshot(activeApp, realtimeConfig.perceptionConfig, prompt);
@@ -574,11 +575,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             { role: 'user', content: prompt }
         ];
 
-        const baseUrl = apiConfig.baseUrl.replace(/\/+$/, '');
-        const res = await fetch(`${baseUrl}/chat/completions`, {
+        let requestBody: any = { model: apiConfig.model, messages, temperature: 0.85 };
+        if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
+        const res = await fetch(resolved.chatUrl, {
             method: 'POST',
-            headers,
-            body: JSON.stringify({ model: apiConfig.model, messages, temperature: 0.85 })
+            headers: resolved.headers,
+            body: JSON.stringify(requestBody)
         });
 
         if (!res.ok) throw new Error(`API Error ${res.status}`);

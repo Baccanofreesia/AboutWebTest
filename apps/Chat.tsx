@@ -4,7 +4,7 @@
 import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB, ScheduledMessage } from '../utils/db';
-import { Message, MessageType, ChatTheme, BubbleStyle, MemoryFragment, AppID, CharacterProfile } from '../types';
+import { Message, MessageType, ChatTheme, BubbleStyle, MemoryFragment, AppID, CharacterProfile, UserProfile } from '../types';
 import Modal from '../components/os/Modal';
 import { processImage } from '../utils/file';
 import { LocalNotifications } from '@capacitor/local-notifications';
@@ -20,6 +20,10 @@ import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import VoiceToast, { useVoiceToast } from '../components/chat/VoiceToast';
 import { synthesizeSpeech } from '../utils/ttsService';
 import { getSTTService } from '../utils/sttService';
+import { StickerParser, StickerSet, StickerItem } from '../utils/stickerParser';
+import StickerPicker from '../components/chat/StickerPicker';
+import { voiceStopIntent, voiceStartIntent } from '../utils/voiceIntent';
+import { resolveApiEndpoint } from '../utils/apiResolver';
 
 // Built-in presets map to the new data structure for consistency
 const PRESET_THEMES: Record<string, ChatTheme> = {
@@ -233,6 +237,7 @@ const Chat: React.FC = () => {
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedMsgIds, setSelectedMsgIds] = useState<Set<number>>(new Set());
     const [allHistoryMessages, setAllHistoryMessages] = useState<Message[]>([]);
+    const [pickerKey, setPickerKey] = useState(0);
     const [translationEnabled, setTranslationEnabled] = useState(() => {
         try { return JSON.parse(localStorage.getItem(`chat_translate_enabled_${activeCharacterId}`) || 'false'); } catch { return false; }
     });
@@ -283,7 +288,9 @@ const Chat: React.FC = () => {
         if (!char) return;
         await updateCharacter(char.id, updates as any);
     }, [char, updateCharacter]);
-
+    const updateUserProfileDisplay = useCallback(async (updates: Partial<UserProfile>) => {
+        await updateUserProfile(updates);
+    }, [updateUserProfile]);
     const { isTyping, recallStatus, lastTokenUsage, setLastTokenUsage, triggerAI } = useChatAI({
         char,
         userProfile,
@@ -294,13 +301,14 @@ const Chat: React.FC = () => {
         addToast,
         setMessages,
         updateAgent: updateAgentDisplay as any,
-        updateUserProfile,
+        updateUserProfile: updateUserProfileDisplay as any,
         translationConfig: translationEnabled
             ? { enabled: true, sourceLang: translateSourceLang, targetLang: translateTargetLang }
             : undefined,
         xhsEnabled: !!realtimeConfig?.xhsEnabled,
         xhsMcpConfig: realtimeConfig?.xhsMcpConfig,
-        sessionVoiceActive
+        sessionVoiceActive,
+        setVoiceEnergy,
     });
 
     // Auto-TTS removed (moved to ChatParser for unified handling)
@@ -326,8 +334,10 @@ const Chat: React.FC = () => {
             setSelectedMsgIds(new Set());
             setVisibleCount(30);
             setLastTokenUsage(null);
+
+            // Phase 3.3: Load stickers - now handled internally by StickerPicker
         }
-    }, [activeCharacterId]);
+    }, [activeCharacterId, workspaceRootPath]);
 
     useEffect(() => {
         if (modalType === 'history-manager' && activeCharacterId) {
@@ -402,12 +412,10 @@ const Chat: React.FC = () => {
     const inferImageDetail = useCallback(async (imageDataUrl: string, mediaLabel: '图片' | '视频' = '图片'): Promise<string> => {
         if (!apiConfig?.apiKey || !apiConfig?.baseUrl || !apiConfig?.model) return '';
         try {
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+            const resolved = resolveApiEndpoint(apiConfig);
+            const response = await fetch(resolved.chatUrl, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${apiConfig.apiKey}`
-                },
+                headers: resolved.headers,
                 body: JSON.stringify({
                     model: apiConfig.model,
                     messages: [{
@@ -925,16 +933,19 @@ const Chat: React.FC = () => {
 日志:
 ${rawLog.substring(0, 8000)}`;
 
-                const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                    body: JSON.stringify({
+                const resolved = resolveApiEndpoint(apiConfig);
+                let sumBody: any = {
                         model: apiConfig.model,
                         messages: [{ role: "user", content: prompt }],
                         temperature: 0.5,
                         // FIX: Increased token limit for reasoning models
                         max_tokens: 4000
-                    })
+                    };
+                if (resolved.transformBody) sumBody = resolved.transformBody(sumBody);
+                const response = await fetch(resolved.chatUrl, {
+                    method: 'POST',
+                    headers: resolved.headers,
+                    body: JSON.stringify(sumBody)
                 });
 
                 if (!response.ok) throw new Error(`API Error on ${dateStr}`);
@@ -1034,9 +1045,6 @@ ${rawLog.substring(0, 8000)}`;
         setVoiceEnergy(prev => Math.min(100, prev + 15));
 
         let nextVoiceActive = sessionVoiceActive;
-        const voiceStartIntent = /(用语音|发语音|语音聊|说话给我听|我想听你的声音|可以说话了)/i;
-        const voiceStopIntent = /(不用发语音|别发语音|发文字|停止语音|关掉语音|用文字|别说话)/i;
-        
         // 1. Check for explicit intent first (Highest Priority)
         if (voiceStopIntent.test(text)) {
             nextVoiceActive = false;
@@ -1090,8 +1098,8 @@ ${rawLog.substring(0, 8000)}`;
         setMessages(updatedMsgs);
         setShowPanel('none');
 
-        // Allow proactive voice if session is NOT currently in voice mode, we have enough energy, and random check passes.
-        const proactiveVoiceAllowed = !nextVoiceActive && voiceEnergy >= 60 && Math.random() < 0.15;
+        // Allow proactive voice if session is NOT currently in voice mode, we have enough energy, system is not locked, and random check passes.
+        const proactiveVoiceAllowed = !nextVoiceActive && !voiceLock && voiceEnergy >= 60 && Math.random() < 0.15;
 
         // == Phase 2.5: Humanized Message Coalescing (Debounce) ==
         if (triggerDebounceTimerRef.current) {
@@ -1235,7 +1243,7 @@ ${rawLog.substring(0, 8000)}`;
         const next = !translationEnabled;
         setTranslationEnabled(next);
         localStorage.setItem(`chat_translate_enabled_${activeCharacterId}`, JSON.stringify(next));
-        
+
         // Voice Lang Sync Logic
         if (char) {
             const nextVoiceLang = next ? langNameToVoiceCode(translateSourceLang) : '';
@@ -1250,7 +1258,7 @@ ${rawLog.substring(0, 8000)}`;
     const handleSetTranslateSourceLang = useCallback(async (lang: string) => {
         setTranslateSourceLang(lang);
         localStorage.setItem('chat_translate_source_lang', lang);
-        
+
         // Voice Lang Sync Logic
         if (translationEnabled && char) {
             const nextVoiceLang = langNameToVoiceCode(lang);
@@ -1421,6 +1429,21 @@ ${rawLog.substring(0, 8000)}`;
                 onDeleteMessage={handleDeleteMessage}
                 onCopyMessage={handleCopyMessage}
                 onDeleteEmoji={handleDeleteEmoji}
+                onFavoriteSticker={async () => {
+                    if (selectedMessage?.type === 'emoji' && workspaceRootPath) {
+                        const url = selectedMessage.content;
+                        // Infer name from metadata or URL
+                        const name = selectedMessage.metadata?.stickerName || url.split('/').pop()?.split('.')[0] || '收藏表情';
+                        const ok = await StickerParser.favoriteSticker(workspaceRootPath, name, url, allowGlobal);
+                        if (ok) {
+                            setPickerKey(prev => prev + 1);
+                            addToast('已收藏到表情包', 'success');
+                        } else {
+                            addToast('收藏失败', 'error');
+                        }
+                        setModalType('none');
+                    }
+                }}
                 chatWaitTime={chatWaitTime}
                 onSetChatWaitTime={setChatWaitTime}
                 replySplitInterval={settingsReplySplitInterval}
@@ -1774,7 +1797,7 @@ ${rawLog.substring(0, 8000)}`;
                                 {/* Moved Regenerate Button Here */}
                                 <button onClick={handleReroll} disabled={!canReroll} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${canReroll ? 'text-slate-600' : 'text-slate-300 opacity-50'}`}>
                                     <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${canReroll ? 'bg-emerald-50 text-emerald-400 border-emerald-100' : 'bg-slate-50 text-slate-300 border-slate-100'}`}>
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
                                             <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
                                         </svg>
                                     </div>
@@ -1784,24 +1807,18 @@ ${rawLog.substring(0, 8000)}`;
                             </div>
                         )}
                         {showPanel === 'emojis' && (
-                            <div className="p-4 grid grid-cols-4 gap-3">
-                                <button onClick={() => setModalType('emoji-import')} className="aspect-square bg-slate-100 rounded-2xl border-2 border-dashed border-slate-300 flex items-center justify-center text-2xl text-slate-400">+</button>
-                                {emojis.map((e, i) => (
-                                    <button
-                                        key={i}
-                                        onClick={() => handleSendText(e.url, 'emoji')}
-                                        onTouchStart={() => handleTouchStart(e, 'emoji')}
-                                        onTouchEnd={handleTouchEnd}
-                                        onMouseDown={() => handleTouchStart(e, 'emoji')}
-                                        onMouseUp={handleTouchEnd}
-                                        onMouseLeave={handleTouchEnd}
-                                        onContextMenu={(ev) => { ev.preventDefault(); setSelectedEmoji(e); setModalType('delete-emoji'); }}
-                                        className="aspect-square bg-white rounded-2xl p-2 shadow-sm relative active:scale-95 transition-transform"
-                                    >
-                                        <img src={e.url} className="w-full h-full object-contain pointer-events-none" />
-                                    </button>
-                                ))}
-                            </div>
+                            <StickerPicker
+                                key={pickerKey}
+                                workspaceRootPath={workspaceRootPath || ''}
+                                onSelect={(item) => handleSendText(item.url, 'emoji', { stickerName: item.name })}
+                                addToast={addToast}
+                                onDeleteFav={async (item) => {
+                                    if (await StickerParser.deleteFavorite(workspaceRootPath || '', item.url)) {
+                                        addToast('表情已从收藏移除', 'success');
+                                        setPickerKey(prev => prev + 1);
+                                    }
+                                }}
+                            />
                         )}
                         {showPanel === 'chars' && (
                             <div className="p-5 space-y-6">
@@ -1811,24 +1828,16 @@ ${rawLog.substring(0, 8000)}`;
                                         {Object.values(PRESET_THEMES).map(t => (
                                             <button key={t.id} onClick={() => updateCharacter(char.id, { bubbleStyle: t.id })} className={`px-6 py-3 rounded-2xl text-xs font-bold border shrink-0 transition-all ${char.bubbleStyle === t.id ? 'bg-primary text-white border-primary' : 'bg-white border-slate-200 text-slate-600'}`}>{t.name}</button>
                                         ))}
-                                        {customThemes.map(t => (
-                                            <div key={t.id} className="relative group shrink-0">
-                                                <button onClick={() => updateCharacter(char.id, { bubbleStyle: t.id })} className={`px-6 py-3 rounded-2xl text-xs font-bold border transition-all ${char.bubbleStyle === t.id ? 'bg-indigo-500 text-white border-indigo-500' : 'bg-indigo-50 border-indigo-100 text-indigo-600'}`}>
-                                                    {t.name} (DIY)
-                                                </button>
-                                                <button onClick={(e) => { e.stopPropagation(); removeCustomTheme(t.id); }} className="absolute -top-2 -right-2 bg-red-400 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs shadow-md opacity-0 group-hover:opacity-100 transition-opacity">×</button>
-                                            </div>
-                                        ))}
                                     </div>
                                 </div>
                                 <div>
-                                    <h3 className="text-xs font-bold text-slate-400 px-1 tracking-wider uppercase mb-3">切换会话</h3>
-                                    <div className="space-y-3">
+                                    <h3 className="text-xs font-bold text-slate-400 px-1 tracking-wider uppercase mb-3">我的形象</h3>
+                                    <div className="flex flex-wrap gap-3 px-1">
                                         {characters.map(c => (
-                                            <div key={c.id} onClick={() => { setActiveCharacterId(c.id); setShowPanel('none'); }} className={`flex items-center gap-4 p-3 rounded-[20px] border cursor-pointer ${c.id === activeCharacterId ? 'bg-white border-primary/30 shadow-md' : 'bg-white/50 border-transparent'}`}>
-                                                <img src={c.displayAvatar || c.avatar} className="w-12 h-12 rounded-2xl object-cover" />
-                                                <div className="flex-1"><div className="font-bold text-sm text-slate-700">{c.nickname || c.name}</div><div className="text-xs text-slate-400 truncate">{c.description}</div></div>
-                                            </div>
+                                            <button key={c.id} onClick={() => { setActiveCharacterId(c.id); setShowPanel('none'); }} className={`px-4 py-2 rounded-xl text-xs font-bold border flex items-center gap-2 transition-all ${activeCharacterId === c.id ? 'bg-slate-100 text-primary border-primary/20' : 'bg-white border-slate-200 text-slate-500'}`}>
+                                                <img src={c.avatar} className="w-5 h-5 rounded-full object-cover" alt={c.name} />
+                                                {c.nickname || c.name}
+                                            </button>
                                         ))}
                                     </div>
                                 </div>
@@ -1837,6 +1846,7 @@ ${rawLog.substring(0, 8000)}`;
                     </div>
                 )}
             </div>
+            {/* Persistent Hidden Inputs */}
         </div>
     );
 };

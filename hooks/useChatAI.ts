@@ -1,11 +1,14 @@
 import { useState } from 'react';
-import { CharacterProfile, UserProfile, Message } from '../types';
+import { CharacterProfile, UserProfile, Message, StickerUsageRecord } from '../types';
 import { DB } from '../utils/db';
 import { ContextBuilder } from '../utils/context';
 import { ChatParser } from '../utils/chatParser';
+import { StickerParser, StickerItem, StickerSet } from '../utils/stickerParser';
 import { ContextEnhancer } from '../utils/contextEnhancer';
 import { fsBridge } from '../utils/fsBridge';
 import { XhsMcpClient, extractNotesFromMcpData, normalizeNote } from '../utils/xhsMcpClient';
+import { voiceStopIntent } from '../utils/voiceIntent';
+import { resolveApiEndpoint } from '../utils/apiResolver';
 
 interface UseChatAIProps {
     char: CharacterProfile | undefined;
@@ -80,16 +83,9 @@ export const useChatAI = ({
         setRecallStatus('');
 
         try {
-            let baseUrl = apiConfig.baseUrl.replace(/\/+$/, '');
-            
-            // 开发环境代理适配：火山引擎 (解决本地开发 CORS)
-            if (window.location.hostname === 'localhost' && baseUrl.includes('ark.cn-beijing.volces.com')) {
-                const proxyPath = '/api/proxy/volcengine';
-                const relativePath = baseUrl.replace('https://ark.cn-beijing.volces.com', '');
-                baseUrl = `${proxyPath}${relativePath}`;
-            }
-
-            const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey || 'sk-none'}` };
+            const resolved = resolveApiEndpoint(apiConfig);
+            const baseUrl = resolved.chatUrl.replace(/\/chat\/completions$/, '');
+            const headers = resolved.headers;
 
             const userDisplayName = userProfile.nickname || userProfile.name;
             const agentDisplayName = char.nickname || char.name;
@@ -98,23 +94,97 @@ export const useChatAI = ({
             // == 连续语音模式与主动语音指令注入 ==
             const isVoiceCurrentlyActive = voiceActiveOverride !== undefined ? voiceActiveOverride : sessionVoiceActive;
             if (isVoiceCurrentlyActive && char.chatVoiceEnabled) {
-                baseSystemPrompt += `\n### 连续语音对话模式 (Continuous Voice Mode Active)\n1. **当前状态**: 用户期望连续语音互动。\n2. **要求**: 你的回复**优先且频繁**使用 \`<语音>文本</语音>\` 标签。确保情感表达自然且丰富。\n3. **退出提示**: 除非用户明确要求停止（如“发文字”），否则请坚持使用语音标签。\n`;
-            } else if (proactiveVoiceAllowed && char.chatVoiceEnabled) {
-                baseSystemPrompt += `\n### 主动启发语音 (Proactive Voice Initiative)\n1. **特殊权限**: 你现在拥有发出语音的“体力”。\n2. **触发策略**: 你可以**挑选**并尝试在回复中主动包含 \`<语音>文本</语音>\`。推荐在表达剧烈情感（委屈、狂喜、生气）、低声分享秘密或想要对用户撒娇时使用。\n3. **注意**: 这是一个高成本动作，如果当前对话气氛平淡，请继续使用普通文字。\n`;
+                baseSystemPrompt += `\n### 连续语音对话模式 (Continuous Voice Mode Active)\n   - **要求**: 你的回复**必须全程使用** \`<语音>文本</语音>\` 标签包裹所有自然语言文本内容。每一对标签会生成一个独立的语音气泡。即使有多个气泡，也请确保每个气泡的文本都在标签内。**非自然内容（URL/文件或动作标签/表情包指令）如需发送，请与语音分离输出，不要放在 <语音> 内**。
+   - **退出提示**: 除非用户明确要求停止（如“发文字”），否则请坚持全程语音。\n`;
+            } else {
+                // Defensive: If the last user message was voice but session mode is off, explicitly tell AI not to use voice tags.
+                const lastUserMsg = currentMsgs.filter(m => m.role === 'user').pop();
+                if (lastUserMsg?.type === 'voice' || (lastUserMsg?.content && voiceStopIntent.test(lastUserMsg.content))) {
+                    baseSystemPrompt += `\n**注意**: 用户当前倾向于使用文本交流，请【严禁】输出 \`<语音>\` 标签。保持纯文本回复。\n`;
+                }
+
+                if (proactiveVoiceAllowed && char.chatVoiceEnabled) {
+                    baseSystemPrompt += `\n### 主动启发语音 (Proactive Voice Initiative)\n1. **特殊权限**: 你现在拥有发出语音的“体力”。\n2. **触发策略**: 你可以**挑选**并尝试在回复中主动包含 \`<语音>文本</语音>\`。推荐在表达剧烈情感（委屈、狂喜、生气）、低声分享秘密或想要对用户撒娇时使用。\n3. **注意**: 这是一个高成本动作，如果当前对话气氛平淡，请继续使用普通文字。\n`;
+                }
             }
 
-            const emojiNames = emojis.map(e => e.name).join(', ');
+            const workspaceRootPath = apiConfig?.nativeWorkspacePath || '';
+            let stickerSets: StickerSet[] = [];
+            let stickerIndex = '';
+            let stickerRelevantNames: string[] = [];
+            const stickerUrlNameMap = new Map<string, string>();
+            const stickerNameItemMap = new Map<string, StickerItem>();
+
+            if (workspaceRootPath) {
+                try {
+                    stickerSets = await StickerParser.loadAllStickers(workspaceRootPath);
+                    const usageMap = await DB.getStickerUsageMap();
+                    stickerIndex = StickerParser.buildStickerIndex(stickerSets, 4, 12);
+
+                    const stickerQueryText = currentMsgs
+                        .slice(-6)
+                        .map(m => {
+                            if (m.type === 'emoji') return String(m.metadata?.stickerName || '').trim();
+                            if (typeof m.content === 'string') return m.content;
+                            return '';
+                        })
+                        .join(' ');
+
+                    const relevant = StickerParser.searchRelevantStickersWithCategory(stickerSets, stickerQueryText, 15, undefined, usageMap);
+                    stickerRelevantNames = Array.from(new Set(relevant.map(r => r.name))).slice(0, 15);
+
+                    for (const set of stickerSets) {
+                        for (const item of set.items) {
+                            if (item.url) stickerUrlNameMap.set(item.url, item.name);
+                            if (item.name && !stickerNameItemMap.has(item.name)) {
+                                stickerNameItemMap.set(item.name, item);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    stickerSets = [];
+                }
+            }
+
+            for (const e of emojis) {
+                if (!e?.name || !e?.url) continue;
+                if (!stickerUrlNameMap.has(e.url)) stickerUrlNameMap.set(e.url, e.name);
+                if (!stickerNameItemMap.has(e.name)) {
+                    stickerNameItemMap.set(e.name, { name: e.name, url: e.url, category: '自定义' });
+                }
+            }
             baseSystemPrompt += `### 聊天 App 行为规范 (Chat App Rules)\n            **注意，你正在手机聊天，无论之前是什么模式，当前，你得知道你已经处于线上聊天状态了，请不要输出你的行为**\n1. **沉浸感**: 保持角色扮演。使用适合即时通讯(IM)的口语化短句。\n2. **行为模式**: 不要总是围绕用户转。分享你自己的生活、想法或随意的观察。有时候要“任性”或“以自我为中心”一点，这更像真人，具体的程度视你的性格而定。\n3. **多消息合并与回复策略 (Multi-Message Strategy - Integration vs. Splitting)**:
    - **智能整合 (Integration)**：当用户连续发送多条**强关联**的消息时（如对同一事物的分次描述），必须进行“脱水”处理。识别核心焦点，**只针对最新或最核心的内容进行回复**。忽略过时的状态信息（如“我准备发了” -> “发了”，只需回复后者）。
    - **智能拆分 (Splitting)**：当多条消息话题**跳跃或非强关联**时（如问了两个不同领域的独立问题），必须分段回复。
-   - **分段输出 (Bubble Splitting)**：必须使用**换行符 (\\n)** 分隔不同的逻辑段落，每一段会显示为独立的气泡。
-4. **格式禁忌**:
+   - **分段输出 (Bubble Splitting)**：必须使用**实际的换行符**（回车）来分隔不同的逻辑段落。每一对连续的换行符会将内容拆分为独立的消息气泡。不要直接输出 "\\n" 字符串。
+4. **格式禁忌与表情规范 (Formatting & Emojis)**:
    - 【严禁】在输出中包含时间戳、名字前缀或"[角色名]:"。
    - **【严禁】模仿历史记录中的系统日志格式（如"[你 发送了...]"）。**
-   - **发送表情包**: 必须且只能使用命令: \`[[SEND_EMOJI: 表情名称]]\`。可用表情: [${emojiNames || '无'}]。\n5. **昵称/实名规则**:\n   - 用户实名=${userProfile.name}，聊天昵称=${userDisplayName}\n   - 你的实名=${char.name}，聊天昵称=${agentDisplayName}\n   - 默认用聊天昵称，除非用户明确要求使用实名。\n6. **环境感知**:\n   - 留意 [系统提示] 中的时间跨度。如果用户消失了很久，请根据你们的关系做出反应。\n   - 如果用户发送了图片或视频，请对媒体内容进行评论。\n7. **相册优先原则**:\n   - 涉及头像更换/发图时，优先使用相册现有图片；参数可直接给“文件名”，系统会在相册中检索。\n   - 仅当你明确需要新增素材且确认有价值时，才使用联网下载入库动作。\n8. **可用动作**:\n   - 回戳用户: \`[[ACTION:POKE]]\`
+   - **【严禁】输出模拟思考/耗时标记**（如 \`[1s]\`、\`[2.5s]\`、\`（思考）\`）或任何舞台指示。
+   - **原生 Emoji 使用**: 鼓励在回复中自然地嵌入 Unicode Emoji（如 ✨, 💖, 😅, 🪴, ☕）作为语气的点缀或“微表情”。
+   - **表情克制与多样性**: 保持表情使用克制（建议每 3-5 条消息中出现 1-2 个表情），严禁堆砌。根据对话的**细腻情感波动**（如尴尬、期待、治愈、忧郁）挑选最契合的表情，严禁机械重复。
+   - **表情包使用**: 允许使用表情包，使用 \`[[SEND_EMOJI: 名称]]\` 或 \`[[SEND_EMOJI_FROM: 分类|关键词]]\`，并遵守表情包规则（见下方）。
+5. **昵称/实名规则**:
+   - 用户实名=${userProfile.name}，聊天昵称=${userDisplayName}
+   - 你的实名=${char.name}，聊天昵称=${agentDisplayName}
+   - 默认用聊天昵称，除非用户明确要求使用实名。
+6. **环境感知**:
+   - 留意 [系统提示] 中的时间跨度。如果用户消失了很久，请根据你们的关系做出反应。
+   - 如果用户发送了图片或视频，请对媒体内容进行评论。
+7. **相册优先原则**:
+   - 涉及头像更换/发图时，优先使用相册现有图片；参数可直接给“文件名”，系统会在相册中检索。
+   - 仅当你明确需要新增素材且确认有价值时，才使用联网下载入库动作。
+   - **相册 vs 工作区**: 相册=图片/视频库（只放媒体），使用 \`[[ACTION:SEND_GALLERY_IMAGE]]\` / \`[[ACTION:GALLERY_SCAN]]\` / \`[[ACTION:SAVE_IMAGE_FROM_URL]]\` 等；工作区=文件系统（文档/代码/压缩包/表格等），使用 \`[[ACTION:SEND_FILE]]\` 或 <fs_*> 操作。不要把相册路径当工作区路径。
+8. **可用动作**:
+   - 回戳用户: \`[[ACTION:POKE]]\`
    - 转账: \`[[ACTION:TRANSFER:100]]\`
    - 调取记忆: \`[[RECALL: YYYY-MM]]\`
-   - **添加纪念日**: \`[[ACTION:ADD_EVENT | 标题(Title) | YYYY-MM-DD]]\`。\n   - **定时发送消息**: \`[schedule_message | YYYY-MM-DD HH:MM:SS | fixed | 消息内容]\`\n   - **改昵称**: \`[[ACTION:CHANGE_NICKNAME|agent|新昵称]]\` 或 \`[[ACTION:CHANGE_NICKNAME|user|新昵称]]\`\n   - **从相册换头像**: \`[[ACTION:CHANGE_AVATAR_FROM_GALLERY|agent|/路径.jpg或文件名]]\` 或 user\n   - **设置情侣头像**: \`[[ACTION:CHANGE_COUPLE_AVATAR_FROM_GALLERY|/用户图或文件名|/Agent图或文件名]]\`\n   - **查看相册摘要**: \`[[ACTION:GALLERY_SCAN]]\`
+   - **添加纪念日**: \`[[ACTION:ADD_EVENT | 标题(Title) | YYYY-MM-DD]]\`。
+   - **定时发送消息**: \`[schedule_message | YYYY-MM-DD HH:MM:SS | fixed | 消息内容]\`
+   - **改昵称**: \`[[ACTION:CHANGE_NICKNAME|agent|新昵称]]\` 或 \`[[ACTION:CHANGE_NICKNAME|user|新昵称]]\`
+   - **从相册换头像**: \`[[ACTION:CHANGE_AVATAR_FROM_GALLERY|agent|/路径.jpg或文件名]]\` 或 user
+   - **设置情侣头像**: \`[[ACTION:CHANGE_COUPLE_AVATAR_FROM_GALLERY|/用户图或文件名|/Agent图或文件名]]\`
+   - **查看相册摘要**: \`[[ACTION:GALLERY_SCAN]]\`
    - **发送相册图**: \`[[ACTION:SEND_GALLERY_IMAGE|/路径.jpg或文件名|可选文案]]\`
    - **发送工作区文件**: \`[[ACTION:SEND_FILE|/工作区相对路径|可选文案]]\`
    - **删除相册图**: \`[[ACTION:DELETE_GALLERY_IMAGE|/路径.jpg或文件名]]\`
@@ -127,6 +197,13 @@ export const useChatAI = ({
      [删除文件]: <fs_delete file="文件路径" />
      [执行文件]: <fs_execute file="文件路径" /> (支持执行 python/node 脚本，或直接运行 .bat / .exe，结果通过 STDOUT 呈现)
     (注意：由于安全限制，仅当用户开启全局权限后，你才能跳出Workspace访问/执行其他系统文件)\n       -# 【核心警告】：一旦使用了 <create_app> 或 <fs_write>，请务必只输出一次，绝不在正常的聊天回复中重复输出 App 代码！只有当用户明确要求【更新/重写/开发】App 时才能触发。\n`;
+            baseSystemPrompt += `\n### 表情包使用准则 (Sticker Rules)\n- 你现在是一个真实的人类角色，发送表情包本质是为了辅助表达情绪，请让它显得自然且克制。\n- **频率控制**: 严禁每轮都用。保持自然的节奏（建议每 3-5 条消息中出现 1 次表情包）。\n- **位置限制**: 表情包必须出现在**整轮回复的中间段落**。它应该作为情绪的过渡点或强调点。\n- **禁止收尾**: 【绝对禁止】在整轮回复的最后一句话后面添加表情包。表情包之后必须跟随至少一句话来完成表达。\n- **结构规范**: 开头回应文字 -> (可选) 1个表情包 -> 结尾补充/收尾文字。\n- 当用户发送表情包时，系统会在历史中标注名称/分类，请结合名称理解情绪与语境并给予回应。\n- 发送指令：\`[[SEND_EMOJI: 表情名称]]\` 或 \`[[SEND_EMOJI_FROM: 分类|关键词]]\`。\n`;
+
+            if (stickerIndex || stickerRelevantNames.length > 0) {
+                const relevantLine = stickerRelevantNames.length > 0 ? stickerRelevantNames.join('、') : '（无）';
+                baseSystemPrompt += `\n### 表情包系统索引 (Sticker Inventory)\n- 系统已从工作区 \`stickers/\` 目录扫描表情包。\n- 分类摘要（抽样）:\n${stickerIndex || '（未发现可用分类）'}\n- 与当前对话相关的候选（最多15个）：${relevantLine}\n`;
+            }
+
             const bilingualActive = translationConfig?.enabled && translationConfig.sourceLang && translationConfig.targetLang;
             if (bilingualActive) {
                 baseSystemPrompt += `\n8. **双语输出规则（必须严格遵守）**:
@@ -140,7 +217,7 @@ export const useChatAI = ({
 - 每句话单独包裹一个 <翻译> 标签
 - 多句话就输出多个 <翻译> 标签，一句一个
 - <翻译> 标签外不要写任何文字
-- 表情包命令 [[SEND_EMOJI: ...]] 放在所有 <翻译> 标签外面`;
+- 表情包命令 [[SEND_EMOJI: ...]] / [[SEND_EMOJI_FROM: 分类|关键词]] 放在所有 <翻译> 标签外面`;
             }
             if (xhsEnabled) {
                 baseSystemPrompt += `\n9. **小红书模式**:
@@ -158,7 +235,7 @@ export const useChatAI = ({
 用户开启了语音消息功能。
 **你可以发送语音消息！** 就像真人用微信一样，你可以选择打字或者发语音。
 用 \`<语音>要说的话</语音>\` 标签来发送语音。标签里的内容会被转成真正的语音条显示给用户。
-- \`<语音>\` 里只写会被朗读的文字，不要包含括号动作或舞台指示。
+- \`<语音>\` 里只写会被朗读的自然语言，不要包含括号动作、舞台指示、URL、文件/动作标签、分享链接或表情包指令（如 \`[[SEND_EMOJI]]\`）。
 - 每条消息最多一个 \`<语音>\` 标签。
 - 不是每条消息都要发语音！像真人一样，有时候打字，有时候发语音，自然切换。比较适合发语音的场景：撒娇、吐槽、懒得打字、语气重的时候。
 - **【重要】语音和文字不要互为复读机！** 如果同时发文字和语音，文字和语音请表达【不同】的内容。你不会打完字又发一条语音把同句话再说一遍的。`;
@@ -192,7 +269,7 @@ export const useChatAI = ({
 
 
 
-            const buildHistory = (msgs: Message[]) => msgs.map((m, index) => {
+            const buildHistory = (msgs: Message[], forceTextOnly: boolean = false) => msgs.map((m, index) => {
                 let content: any = m.content;
                 const timeStr = `[${formatDate(m.timestamp)}]`;
 
@@ -202,6 +279,7 @@ export const useChatAI = ({
                     const imageDetail = (m.metadata?.imageDetail || '').toString().trim();
                     let textPart = `${timeStr} [User sent an image${fileName ? ` | file=${fileName}` : ''}${galleryPath ? ` | path=${galleryPath}` : ''}${imageDetail ? ` | detail=${imageDetail}` : ''}]`;
                     if (index === msgs.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
+                    if (forceTextOnly) return { role: m.role, content: textPart };
                     return { role: m.role, content: [{ type: "text", text: textPart }, { type: "image_url", image_url: { url: m.content } }] };
                 }
                 if (m.type === 'video') {
@@ -213,6 +291,7 @@ export const useChatAI = ({
                     const frame = (m.metadata?.videoFrame || '').toString().trim();
                     let textPart = `${timeStr} [${m.role === 'user' ? 'User' : 'Assistant'} sent a video${fileName ? ` | file=${fileName}` : ''}${galleryPath ? ` | path=${galleryPath}` : ''}${videoDetail ? ` | detail=${videoDetail}` : ''}]`;
                     if (index === msgs.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
+                    if (forceTextOnly) return { role: m.role, content: textPart };
                     if (frames.length > 0) return { role: m.role, content: [{ type: "text", text: textPart }, ...frames.map((f: string) => ({ type: "image_url", image_url: { url: f } }))] };
                     if (frame) return { role: m.role, content: [{ type: "text", text: textPart }, { type: "image_url", image_url: { url: frame } }] };
                     return { role: m.role, content: textPart };
@@ -250,8 +329,13 @@ export const useChatAI = ({
                 if (m.type === 'interaction') content = `${timeStr} [系统: 用户戳了你一下]`;
                 else if (m.type === 'transfer') content = `${timeStr} [系统: 用户转账 ${m.metadata?.amount}]`;
                 else if (m.type === 'emoji') {
-                    const stickerName = emojis.find(e => e.url === m.content)?.name || 'Image/Sticker';
-                    content = `${timeStr} [${m.role === 'user' ? '用户' : '你'} 发送了表情包: ${stickerName}]`;
+                    const metaName = (m.metadata?.stickerName || '').toString().trim();
+                    const mapName = stickerUrlNameMap.get(m.content) || '';
+                    const emojiName = emojis.find(e => e.url === m.content)?.name || '';
+                    const stickerName = metaName || mapName || emojiName || 'Image/Sticker';
+                    const category = stickerNameItemMap.get(stickerName)?.category || '';
+                    const catPart = category ? ` | category=${category}` : '';
+                    content = `${timeStr} [${m.role === 'user' ? '用户' : '你'} 发送了表情包: ${stickerName}${catPart}]`;
                 } else content = `${timeStr} ${content}`;
                 return { role: m.role, content };
             });
@@ -269,10 +353,12 @@ export const useChatAI = ({
             }
 
             // == 1. Fetch LLM API with SSE (Real-time Fake Stream logic) ==
-            let response = await fetch(`${baseUrl}/chat/completions`, {
+            let requestBody: any = { model: apiConfig.model, messages: apiMessages, temperature: 0.85, stream: true };
+            if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
+            let response = await fetch(resolved.chatUrl, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ model: apiConfig.model, messages: apiMessages, temperature: 0.85, stream: true })
+                body: JSON.stringify(requestBody)
             });
 
             if (!response.ok) throw new Error(`API Error ${response.status}`);
@@ -306,7 +392,7 @@ export const useChatAI = ({
             }
 
             // Clean artifacts
-            aiContent = aiContent.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, '');
+            aiContent = aiContent.replace(/\[\s*\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}.*?\]/g, '');
             aiContent = aiContent.replace(/^[\w\u4e00-\u9fa5]+:\s*/, '');
             aiContent = aiContent.replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
 
@@ -323,9 +409,11 @@ export const useChatAI = ({
                         content: `[系统: 已成功调取 ${year}-${month} 的日志]\n${detailedLogs}\n[系统: 现在结合这些细节回答。]`
                     };
                     apiMessages = [...apiMessages, { role: 'assistant', content: aiContent }, injectionMessage];
-                    let recallRes = await fetch(`${baseUrl}/chat/completions`, {
+                    let recallBody: any = { model: apiConfig.model, messages: apiMessages, temperature: 0.8, stream: true };
+                    if (resolved.transformBody) recallBody = resolved.transformBody(recallBody);
+                    let recallRes = await fetch(resolved.chatUrl, {
                         method: 'POST', headers,
-                        body: JSON.stringify({ model: apiConfig.model, messages: apiMessages, temperature: 0.8, stream: true })
+                        body: JSON.stringify(recallBody)
                     });
 
                     if (recallRes.ok && recallRes.body) {
@@ -347,7 +435,7 @@ export const useChatAI = ({
                         }
                         rReader.releaseLock();
                         if (recallContent) {
-                            aiContent = recallContent.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, '').replace(/^[\w\u4e00-\u9fa5]+:\s*/, '').replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
+                            aiContent = recallContent.replace(/\[\s*\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}.*?\]/g, '').replace(/^[\w\u4e00-\u9fa5]+:\s*/, '').replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
                         }
                         addToast(`已调用 ${year}-${month} 记忆`, 'info');
                     }
@@ -601,7 +689,7 @@ export const useChatAI = ({
             aiContent = aiContent.replace(xhsPostRegex, '').trim();
 
             const parseResult = await ChatParser.parseAndExecuteActions(aiContent, char, addToast, apiConfig);
-            
+
             // == Phase 2.4: Voice Energy Deduction ==
             const originalWasVoice = /<[语語]音>([\s\S]*?)<\/[语語]音>/i.test(aiContent);
             if (originalWasVoice && !isVoiceCurrentlyActive && proactiveVoiceAllowed) {
@@ -610,7 +698,37 @@ export const useChatAI = ({
 
             aiContent = ChatParser.sanitize(parseResult.content);
             const hasToolResult = parseResult.hasToolResult;
-            
+
+            const resolveStickerByName = (name: string): StickerItem | null => {
+                const trimmed = String(name || '').trim();
+                if (!trimmed) return null;
+                const mapped = stickerNameItemMap.get(trimmed);
+                if (mapped) return mapped;
+                const found = emojis.find(e => e.name === trimmed);
+                if (found?.url) return { name: found.name, url: found.url, category: '自定义' };
+                return null;
+            };
+
+            const emojiFromRegex = /\[\[SEND_EMOJI_FROM:\s*([^|\]]+)\|([^\]]+)\]\]/gi;
+            if (emojiFromRegex.test(aiContent)) {
+                aiContent = aiContent.replace(emojiFromRegex, (_, rawCategory, rawKeyword) => {
+                    const preferCategory = String(rawCategory || '').trim();
+                    const keyword = String(rawKeyword || '').trim();
+                    if (!keyword) return '';
+                    const found = StickerParser.searchRelevantStickersWithCategory(
+                        stickerSets,
+                        keyword,
+                        1,
+                        preferCategory || undefined
+                    )[0];
+                    if (found?.name) {
+                        if (!stickerNameItemMap.has(found.name)) stickerNameItemMap.set(found.name, found);
+                        return `[[SEND_EMOJI: ${found.name}]]`;
+                    }
+                    return '';
+                }).trim();
+            }
+
             // Fix: If a tool result was generated (like a voice message saved to DB), 
             // but there's no text content to stream, we must update UI here.
             if (hasToolResult && !aiContent) {
@@ -678,10 +796,30 @@ export const useChatAI = ({
                     }
 
                     for (const emojiName of bilingualEmojis) {
-                        const foundEmoji = emojis.find(e => e.name === emojiName);
-                        if (foundEmoji) {
+                        const foundEmoji = resolveStickerByName(emojiName);
+                        if (foundEmoji?.url) {
                             await new Promise(r => setTimeout(r, Math.random() * 500 + 300));
-                            await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url });
+                            await DB.saveMessage({
+                                charId: char.id,
+                                role: 'assistant',
+                                type: 'emoji',
+                                content: foundEmoji.url,
+                                metadata: {
+                                    stickerName: foundEmoji.name,
+                                    stickerCategory: foundEmoji.category
+                                } as any
+                            });
+                            await DB.saveRelationEvent({
+                                type: 'agent_sticker_send',
+                                actor: 'agent',
+                                summary: `Agent 发送了表情包: ${foundEmoji.name}`,
+                                payload: {
+                                    stickerName: foundEmoji.name,
+                                    stickerUrl: foundEmoji.url,
+                                    category: foundEmoji.category
+                                }
+                            });
+                            await DB.recordStickerUsage(foundEmoji.name);
                             msgsToUpdate = await DB.getMessagesByCharId(char.id);
                             setMessages(msgsToUpdate);
                         }
@@ -690,13 +828,44 @@ export const useChatAI = ({
                     const parts = ChatParser.splitResponse(aiContent);
                     for (const part of parts) {
                         if (part.type === 'emoji') {
-                            const foundEmoji = emojis.find(e => e.name === part.content);
-                            if (foundEmoji) {
+                            const foundEmoji = resolveStickerByName(part.content);
+                            if (foundEmoji?.url) {
                                 await new Promise(r => setTimeout(r, Math.random() * 500 + 300));
-                                await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url });
+                                await DB.saveMessage({
+                                    charId: char.id,
+                                    role: 'assistant',
+                                    type: 'emoji',
+                                    content: foundEmoji.url,
+                                    metadata: {
+                                        stickerName: foundEmoji.name,
+                                        stickerCategory: foundEmoji.category
+                                    } as any
+                                });
+                                await DB.saveRelationEvent({
+                                    type: 'agent_sticker_send',
+                                    actor: 'agent',
+                                    summary: `Agent 发送了表情包: ${foundEmoji.name}`,
+                                    payload: {
+                                        stickerName: foundEmoji.name,
+                                        stickerUrl: foundEmoji.url,
+                                        category: foundEmoji.category
+                                    }
+                                });
+                                await DB.recordStickerUsage(foundEmoji.name);
                                 msgsToUpdate = await DB.getMessagesByCharId(char.id);
                                 setMessages(msgsToUpdate);
                             }
+                        } else if (part.type === 'silent') {
+                            // Non-natural language (URLs, tags) - Save as text but skip TTS
+                            await new Promise(r => setTimeout(r, 600));
+                            await DB.saveMessage({
+                                charId: char.id,
+                                role: 'assistant',
+                                type: 'text',
+                                content: part.content
+                            });
+                            msgsToUpdate = await DB.getMessagesByCharId(char.id);
+                            setMessages(msgsToUpdate);
                         } else {
                             const rawBlocks = part.content.split(/^\s*---\s*$/m).filter(b => b.trim());
                             const allChunks: string[] = [];
@@ -706,8 +875,6 @@ export const useChatAI = ({
                             if (allChunks.length === 0 && part.content.trim()) allChunks.push(part.content.trim());
 
                             for (const chunk of allChunks) {
-                                // == Phase 2.5: Humanized Pacing ==
-                                // Simulation of typing time based on length, or use fixed interval
                                 let delay = 0;
                                 if (char.replySplitInterval && char.replySplitInterval > 50) {
                                     delay = char.replySplitInterval;
@@ -718,11 +885,20 @@ export const useChatAI = ({
 
                                 // == Phase 2.6: Agent Citation/Reply Parsing ==
                                 let finalChunk = chunk;
-                                
+
                                 if (ChatParser.hasDisplayContent(finalChunk)) {
                                     const cleanChunk = ChatParser.sanitize(finalChunk);
                                     if (cleanChunk) {
-                                        await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: cleanChunk });
+                                        const isVoiceActive = voiceActiveOverride !== undefined ? voiceActiveOverride : sessionVoiceActive;
+                                        let savedAsVoice = false;
+                                        if (isVoiceActive && char.chatVoiceEnabled) {
+                                            savedAsVoice = await ChatParser.synthesizeAndSaveVoice(cleanChunk, char, apiConfig);
+                                        }
+
+                                        if (!savedAsVoice) {
+                                            await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'text', content: cleanChunk });
+                                        }
+
                                         msgsToUpdate = await DB.getMessagesByCharId(char.id);
                                         setMessages(msgsToUpdate);
                                     }

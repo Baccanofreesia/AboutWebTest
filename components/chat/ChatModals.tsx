@@ -45,6 +45,7 @@ interface ChatModalsProps {
     onDeleteMessage: () => void;
     onCopyMessage: () => void;
     onDeleteEmoji: () => void;
+    onFavoriteSticker?: () => void;
     chatWaitTime: number;
     onSetChatWaitTime: (v: number) => void;
     replySplitInterval?: number;
@@ -63,7 +64,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     chatVoiceEnabled, onToggleChatVoice, chatVoiceLang, onSetChatVoiceLang,
     translationEnabled, onToggleTranslation, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
     onTransfer, onImportEmoji, onSaveSettings, onBgUpload, onRemoveBg, onClearHistory,
-    onSetHistoryStart, onEnterSelectionMode, onReplyMessage, onEditMessageStart, onConfirmEditMessage, onDeleteMessage, onCopyMessage, onDeleteEmoji,
+    onSetHistoryStart, onEnterSelectionMode, onReplyMessage, onEditMessageStart, onConfirmEditMessage, onDeleteMessage, onCopyMessage, onDeleteEmoji, onFavoriteSticker,
     chatWaitTime, onSetChatWaitTime, replySplitInterval, onSetReplySplitInterval
 }) => {
     const bgInputRef = useRef<HTMLInputElement>(null);
@@ -238,6 +239,14 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                     <button onClick={onReplyMessage} className="w-full py-3 bg-slate-50 text-slate-700 font-medium rounded-2xl active:bg-slate-100 transition-colors flex items-center justify-center gap-2">引用 / 回复</button>
                     {selectedMessage?.type === 'text' && <button onClick={onEditMessageStart} className="w-full py-3 bg-slate-50 text-slate-700 font-medium rounded-2xl active:bg-slate-100 transition-colors flex items-center justify-center gap-2">编辑内容</button>}
                     {selectedMessage?.type === 'text' && <button onClick={onCopyMessage} className="w-full py-3 bg-slate-50 text-slate-700 font-medium rounded-2xl active:bg-slate-100 transition-colors flex items-center justify-center gap-2">复制文字</button>}
+                    {selectedMessage?.type === 'emoji' && onFavoriteSticker && (
+                        <button onClick={onFavoriteSticker} className="w-full py-3 bg-primary/10 text-primary font-bold rounded-2xl active:bg-primary/20 transition-colors flex items-center justify-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" />
+                            </svg>
+                            收藏表情
+                        </button>
+                    )}
                     <button onClick={onDeleteMessage} className="w-full py-3 bg-red-50 text-red-500 font-medium rounded-2xl active:bg-red-100 transition-colors flex items-center justify-center gap-2">删除消息</button>
                 </div>
             </Modal>

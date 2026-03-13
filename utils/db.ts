@@ -1,7 +1,7 @@
 
 
 
-import { AgentProfile, CharacterProfile, Message, ChatTheme, FullBackupData, GalleryImage, UserProfile, DiaryEntry, Task, Anniversary, CronJob, ImageDetail, RelationEvent } from '../types';
+import { AgentProfile, CharacterProfile, Message, ChatTheme, FullBackupData, GalleryImage, UserProfile, DiaryEntry, Task, Anniversary, CronJob, ImageDetail, RelationEvent, StickerUsageRecord } from '../types';
 
 const resolveDbEnv = (): string => {
     const env = (import.meta as any).env || {};
@@ -15,7 +15,7 @@ const resolveDbEnv = (): string => {
 
 const DB_NAME = `AetherOS_Data_${resolveDbEnv()}`;
 // CRITICAL FIX: Increment version to force `onupgradeneeded` on devices that have an old schema
-const DB_VERSION = 19;
+const DB_VERSION = 20;
 
 const STORE_CHARACTERS = 'characters';
 const STORE_MESSAGES = 'messages';
@@ -32,6 +32,7 @@ const STORE_CRON_JOBS = 'cron_jobs';
 const STORE_WORKSPACE = 'workspace_files';
 const STORE_IMAGE_DETAILS = 'image_details';
 const STORE_RELATION_EVENTS = 'relation_events';
+const STORE_STICKER_USAGE = 'sticker_usage';
 
 // --- Workspace File Type ---
 export interface WorkspaceFile {
@@ -107,7 +108,8 @@ const openDB = (): Promise<IDBDatabase> => {
             createStore(STORE_CRON_JOBS, { keyPath: 'id' });
             createStore(STORE_WORKSPACE, { keyPath: 'id' });
             createStore(STORE_IMAGE_DETAILS, { keyPath: 'id' });
-            createStore(STORE_RELATION_EVENTS, { keyPath: 'id' });
+            createStore(STORE_RELATION_EVENTS, { keyPath: 'id', autoIncrement: true });
+            createStore(STORE_STICKER_USAGE, { keyPath: 'name' });
         };
     });
 };
@@ -754,6 +756,52 @@ export const DB = {
         return new Promise((resolve, reject) => {
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
+        });
+    },
+
+    // --- Sticker Usage Tracking ---
+
+    recordStickerUsage: async (name: string): Promise<void> => {
+        const db = await openDB();
+        const transaction = db.transaction(STORE_STICKER_USAGE, 'readwrite');
+        const store = transaction.objectStore(STORE_STICKER_USAGE);
+        
+        return new Promise((resolve, reject) => {
+            const req = store.get(name);
+            req.onsuccess = () => {
+                const record = req.result as StickerUsageRecord | undefined;
+                if (record) {
+                    record.count += 1;
+                    record.lastUsedAt = Date.now();
+                    store.put(record);
+                } else {
+                    store.put({
+                        name,
+                        count: 1,
+                        lastUsedAt: Date.now()
+                    });
+                }
+                resolve();
+            };
+            req.onerror = () => reject(req.error);
+        });
+    },
+
+    getStickerUsageMap: async (): Promise<Map<string, StickerUsageRecord>> => {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(STORE_STICKER_USAGE, 'readonly');
+            const store = transaction.objectStore(STORE_STICKER_USAGE);
+            const request = store.getAll();
+            request.onsuccess = () => {
+                const map = new Map<string, StickerUsageRecord>();
+                const records = request.result as StickerUsageRecord[];
+                for (const r of records) {
+                    map.set(r.name, r);
+                }
+                resolve(map);
+            };
+            request.onerror = () => reject(request.error);
         });
     }
 };

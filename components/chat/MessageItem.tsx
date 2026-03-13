@@ -231,9 +231,25 @@ const MessageItem = React.memo(({
             </div>
         );
     }
+    // MessageItem.tsx 里加这个 hook
+    const useLocalImage = (url: string, workspaceRootPath: string, allowGlobal: boolean) => {
+        const [dataUrl, setDataUrl] = useState<string>('');
+        useEffect(() => {
+            if (!url.startsWith('local://')) return;
+            const relPath = url.replace('local://', '');
+            fsBridge.readFileBase64(workspaceRootPath, relPath, allowGlobal)
+                .then(base64 => {
+                    const ext = relPath.split('.').pop()?.toLowerCase() || 'png';
+                    const mime = ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
+                    setDataUrl(`data:${mime};base64,${base64}`);
+                })
+                .catch(() => setDataUrl(''));
+        }, [url, workspaceRootPath, allowGlobal]);
+        return dataUrl;
+    };
 
     const commonLayout = (content: React.ReactNode) => (
-        <div 
+        <div
             className={`relative flex items-end ${isUser ? 'justify-end' : 'justify-start'} ${marginBottom} px-3 group select-none transition-all duration-200 ${selectionMode ? 'pl-14 bg-black/5 py-1.5' : ''}`}
             onClick={(e) => {
                 if (selectionMode) {
@@ -270,7 +286,16 @@ const MessageItem = React.memo(({
         );
     }
 
-    if (m.type === 'emoji') return commonLayout(<img src={m.content} className="max-w-[160px] max-h-[160px] rounded-2xl hover:scale-105 transition-transform shadow-md active:scale-95" loading="lazy" decoding="async" />);
+    if (m.type === 'emoji') {
+        const isLocal = m.content.startsWith('local://');
+        const EmojiImg = ({ url }: { url: string }) => {
+            const localSrc = useLocalImage(url, workspaceRootPath, allowGlobal);
+            const src = isLocal ? localSrc : url;
+            if (isLocal && !localSrc) return <div className="w-16 h-16 bg-slate-100 rounded-xl animate-pulse" />;
+            return <img src={src} className="w-16 h-16 object-contain rounded-xl" alt="sticker" />;
+        };
+        return commonLayout(<EmojiImg url={m.content} />);
+    }
     if (m.type === 'image') return commonLayout(<div className="relative group"><img src={m.content} className="max-w-[200px] max-h-[300px] rounded-2xl shadow-sm border border-black/5" alt="Uploaded" loading="lazy" decoding="async" /></div>);
     if (m.type === 'video') return commonLayout(
         <div className="relative group max-w-[220px]">
@@ -517,12 +542,11 @@ const MessageItem = React.memo(({
                 />
             )}
             {m.replyTo && (
-                <div 
-                    className={`relative z-10 mb-2.5 pl-3 py-1.5 pr-2 border-l-[3.5px] rounded-r-lg flex flex-col gap-1 max-w-full overflow-hidden transition-colors ${
-                        isUser 
-                            ? 'border-white/40 bg-white/10 text-white/90' 
-                            : 'border-blue-500/50 bg-black/5 text-slate-600'
-                    }`}
+                <div
+                    className={`relative z-10 mb-2.5 pl-3 py-1.5 pr-2 border-l-[3.5px] rounded-r-lg flex flex-col gap-1 max-w-full overflow-hidden transition-colors ${isUser
+                        ? 'border-white/40 bg-white/10 text-white/90'
+                        : 'border-blue-500/50 bg-black/5 text-slate-600'
+                        }`}
                 >
                     <div className="flex items-center gap-1.5 opacity-80">
                         <span className="font-bold text-[11px] tracking-wide uppercase">{m.replyTo.name}</span>

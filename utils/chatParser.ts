@@ -10,6 +10,84 @@ const failedImageDownloads: Record<string, number> = {};
 const failedVideoDownloads: Record<string, number> = {};
 
 export const ChatParser = {
+    /**
+     * Helper to synthesize text and save as a voice message to DB.
+     * Returns true if successful.
+     */
+    synthesizeAndSaveVoice: async (text: string, char: AgentProfile, apiConfig: any): Promise<boolean> => {
+        if (!text || !char.chatVoiceEnabled || !apiConfig?.ttsProvider || apiConfig?.ttsProvider === 'none') {
+            return false;
+        }
+        try {
+            const audioBlob = await synthesizeSpeech(text, char, apiConfig);
+            const base64 = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const data = String(reader.result || '');
+                    resolve(data.includes(',') ? data.split(',')[1] : data);
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(audioBlob);
+            });
+
+            const fileName = `voice_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.mp3`;
+            const relativeDir = 'voice_cache/agent';
+            const relativePath = `${relativeDir}/${fileName}`;
+
+            if (apiConfig.nativeWorkspacePath) {
+                try {
+                    await fsBridge.createFolder(apiConfig.nativeWorkspacePath, relativeDir, !!apiConfig.securityPolicy?.allowGlobalFileAccess);
+                } catch (e) {}
+                await fsBridge.writeFileBase64(apiConfig.nativeWorkspacePath, relativePath, base64, !!apiConfig.securityPolicy?.allowGlobalFileAccess);
+                
+                await DB.saveMessage({
+                    charId: char.id,
+                    role: 'assistant',
+                    type: 'voice',
+                    content: `workspace://${relativePath}`,
+                    metadata: {
+                        duration: Math.ceil(text.length / 4) + 1,
+                        transcription: text,
+                        emotion: (text.match(/[(\uff08\[\u3010]([^\uff09\]\u3011)]+)[)\uff09\]\u3011]/) || [])[1] || '',
+                        source: 'agent_tts',
+                        generatedAt: Date.now()
+                    } as any
+                });
+                await DB.saveRelationEvent({
+                    type: 'agent_voice_send',
+                    actor: 'agent',
+                    summary: `Agent 发送了语音消息: ${text.slice(0, 20)}${text.length > 20 ? '...' : ''}`,
+                    payload: { voicePath: relativePath, transcription: text }
+                });
+            } else {
+                const dataUrl = `data:audio/mpeg;base64,${base64}`;
+                await DB.saveMessage({
+                    charId: char.id,
+                    role: 'assistant',
+                    type: 'voice',
+                    content: dataUrl,
+                    metadata: {
+                        duration: Math.ceil(text.length / 4) + 1,
+                        transcription: text,
+                        emotion: (text.match(/[(\uff08\[\u3010]([^\uff09\]\u3011)]+)[)\uff09\]\u3011]/) || [])[1] || '',
+                        source: 'agent_tts',
+                        generatedAt: Date.now()
+                    } as any
+                });
+                await DB.saveRelationEvent({
+                    type: 'agent_voice_send',
+                    actor: 'agent',
+                    summary: `Agent 发送了语音消息 (Web): ${text.slice(0, 20)}${text.length > 20 ? '...' : ''}`,
+                    payload: { transcription: text }
+                });
+            }
+            return true;
+        } catch (e: any) {
+            console.error("Synthesize and save voice failed:", e);
+            return false;
+        }
+    },
+
     // Return cleaned content and perform side effects
     parseAndExecuteActions: async (
         aiContent: string,
@@ -677,87 +755,55 @@ export const ChatParser = {
         content = content.replace(/\[\[RECALL:.*?\]\]/g, '').trim();
 
         // <语音> tag handling
+        // Voice must be natural language only; strip stickers/URLs/tags from voice content.
         const voiceRegex = /<[语語]音>([\s\S]*?)<\/[语語]音>/gi;
         let voiceMatch;
+        let lastVoiceIndex = 0;
+        let rebuiltContent = '';
         while ((voiceMatch = voiceRegex.exec(content)) !== null) {
-            const voiceText = voiceMatch[1].trim();
-            if (voiceText && char.chatVoiceEnabled && apiConfig?.ttsProvider && apiConfig?.ttsProvider !== 'none') {
-                try {
-                    const audioBlob = await synthesizeSpeech(voiceText, char, apiConfig);
-                    const base64 = await new Promise<string>((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                            const data = String(reader.result || '');
-                            resolve(data.includes(',') ? data.split(',')[1] : data);
-                        };
-                        reader.onerror = reject;
-                        reader.readAsDataURL(audioBlob);
-                    });
+            const rawVoiceText = (voiceMatch[1] || '').trim();
+            // keep content outside voice tags
+            rebuiltContent += content.slice(lastVoiceIndex, voiceMatch.index);
 
-                    const fileName = `voice_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.mp3`;
-                    const relativeDir = 'voice_cache/agent';
-                    const relativePath = `${relativeDir}/${fileName}`;
+            if (rawVoiceText) {
+                const parts = ChatParser.splitResponse(rawVoiceText);
+                const naturalParts: string[] = [];
+                const nonNaturalTokens: string[] = [];
 
-                    if (apiConfig.nativeWorkspacePath) {
-                        // Ensure directory exists
-                        try {
-                            await fsBridge.createFolder(apiConfig.nativeWorkspacePath, relativeDir, !!apiConfig.securityPolicy?.allowGlobalFileAccess);
-                        } catch (e) {}
-                        
-                        await fsBridge.writeFileBase64(apiConfig.nativeWorkspacePath, relativePath, base64, !!apiConfig.securityPolicy?.allowGlobalFileAccess);
-                        
-                        // Save as voice message with workspace path
-                        await DB.saveMessage({
-                            charId: char.id,
-                            role: 'assistant',
-                            type: 'voice',
-                            content: `workspace://${relativePath}`,
-                            metadata: {
-                                duration: Math.ceil(voiceText.length / 4) + 1, // Rough estimate
-                                transcription: voiceText,
-                                // Enhanced emotion extraction: catch (Happy), [Serious], etc.
-                                emotion: (voiceText.match(/[(\uff08\[\u3010]([^\uff09\]\u3011)]+)[)\uff09\]\u3011]/) || [])[1] || '',
-                                source: 'agent_tts',
-                                generatedAt: Date.now()
-                            } as any
-                        });
-                        await DB.saveRelationEvent({
-                            type: 'agent_voice_send',
-                            actor: 'agent',
-                            summary: `Agent 发送了语音消息: ${voiceText.slice(0, 20)}${voiceText.length > 20 ? '...' : ''}`,
-                            payload: { voicePath: relativePath, transcription: voiceText }
-                        });
-                    } else {
-                        // Web fallback: Use DataURL directly
-                        const dataUrl = `data:audio/mpeg;base64,${base64}`;
-                        await DB.saveMessage({
-                            charId: char.id,
-                            role: 'assistant',
-                            type: 'voice',
-                            content: dataUrl,
-                            metadata: {
-                                duration: Math.ceil(voiceText.length / 4) + 1,
-                                transcription: voiceText,
-                                emotion: (voiceText.match(/[(\uff08\[\u3010]([^\uff09\]\u3011)]+)[)\uff09\]\u3011]/) || [])[1] || '',
-                                source: 'agent_tts',
-                                generatedAt: Date.now()
-                            } as any
-                        });
-                        await DB.saveRelationEvent({
-                            type: 'agent_voice_send',
-                            actor: 'agent',
-                            summary: `Agent 发送了语音消息 (Web): ${voiceText.slice(0, 20)}${voiceText.length > 20 ? '...' : ''}`,
-                            payload: { transcription: voiceText }
-                        });
+                for (const part of parts) {
+                    if (part.type === 'text') {
+                        const t = part.content.trim();
+                        if (t) naturalParts.push(t);
+                    } else if (part.type === 'emoji') {
+                        const name = part.content.trim();
+                        if (name) nonNaturalTokens.push(`[[SEND_EMOJI: ${name}]]`);
+                    } else if (part.type === 'silent') {
+                        const t = part.content.trim();
+                        if (t) nonNaturalTokens.push(t);
                     }
-                    hasToolResult = true;
-                } catch (e: any) {
-                    console.error("Agent TTS Synthesis failed:", e);
-                    addToast(`语音合成失败: ${e.message}`, 'error');
+                }
+
+                const voiceTextRaw = naturalParts.join(' ').replace(/\s{2,}/g, ' ').trim();
+                const voiceText = voiceTextRaw
+                    .replace(/\[\s*\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|second|seconds|毫秒|秒)\s*\]\s*/gi, '')
+                    .trim();
+                if (voiceText) {
+                    const success = await ChatParser.synthesizeAndSaveVoice(voiceText, char, apiConfig);
+                    if (success) hasToolResult = true;
+                }
+
+                if (nonNaturalTokens.length > 0) {
+                    if (rebuiltContent && !rebuiltContent.endsWith(' ')) rebuiltContent += ' ';
+                    rebuiltContent += nonNaturalTokens.join(' ') + ' ';
                 }
             }
+
+            lastVoiceIndex = voiceRegex.lastIndex;
         }
-        content = content.replace(voiceRegex, '').trim();
+        if (lastVoiceIndex > 0) {
+            rebuiltContent += content.slice(lastVoiceIndex);
+            content = rebuiltContent.trim();
+        }
 
         if (hasFileMutation && apiConfig) {
             try {
@@ -778,10 +824,12 @@ export const ChatParser = {
     sanitize: (text: string): string => {
         return text
             // Strip leaked timestamps from chat history context:
-            // [2026-02-11 13:52] format (bracketed, from history entries)
-            .replace(/\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s*/g, '')
+            // [2026-02-11 13:52] / [2026/2/11 13:52] / [2026.02.11 13:52] (bracketed)
+            .replace(/\[\s*\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*\]\s*/g, '')
+            // Strip simulated thinking time markers like [1s], [2.5s], [300ms]
+            .replace(/\[\s*\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|second|seconds|毫秒|秒)\s*\]\s*/gi, '')
             // 2026-02-11 13:52 format (unbracketed, at line start)
-            .replace(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*/gm, '')
+            .replace(/^\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*/gm, '')
             // （下午1:52）or（上午10:30）Chinese 12h parenthetical
             .replace(/（[上下]午\d{1,2}[：:]\d{2}）/g, '')
             // (1:52 PM) or (10:30 AM) English 12h parenthetical
@@ -826,6 +874,7 @@ export const ChatParser = {
             .replace(/%%BILINGUAL%%/gi, '')
             .replace(/%%TRANS%%[\s\S]*/gi, '')
             .replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '')
+            .replace(/\[\s*\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|second|seconds|毫秒|秒)\s*\]\s*/gi, '')
             .replace(/^\s*---\s*$/gm, '')
             .replace(/``+/g, '')
             .replace(/(^|\s)`(\s|$)/gm, '$1$2')
@@ -844,20 +893,34 @@ export const ChatParser = {
         return stripped.length > 0;
     },
 
-    // Split text into bubbles (text and emojis)
-    splitResponse: (content: string): { type: 'text' | 'emoji', content: string }[] => {
-        const emojiPattern = /\[\[SEND_EMOJI:\s*(.*?)\]\]/g;
-        const parts: { type: 'text' | 'emoji', content: string }[] = [];
+    // Split text into bubbles (text and non-natural language like emojis/urls)
+    splitResponse: (content: string): { type: 'text' | 'emoji' | 'silent', content: string }[] => {
+        // Combined pattern for:
+        // 1. Stickers: [[SEND_EMOJI: Name]]
+        // 2. URLs: http://... or https://...
+        // 3. File tags: [[FILE: ...]] or [[ACTION: ...]] (if we want them separated)
+        const pattern = /(\[\[SEND_EMOJI:\s*(.*?)\]\])|(https?:\/\/[^\s]+)|(\[\[(?:FILE|ACTION|SEND_EMOJI_FROM):.*?\]\])/gi;
+        const parts: { type: 'text' | 'emoji' | 'silent', content: string }[] = [];
         let lastIndex = 0;
-        let emojiMatch;
+        let match;
 
-        while ((emojiMatch = emojiPattern.exec(content)) !== null) {
-            if (emojiMatch.index > lastIndex) {
-                const textBefore = content.slice(lastIndex, emojiMatch.index).trim();
+        while ((match = pattern.exec(content)) !== null) {
+            if (match.index > lastIndex) {
+                const textBefore = content.slice(lastIndex, match.index).trim();
                 if (textBefore) parts.push({ type: 'text', content: textBefore });
             }
-            parts.push({ type: 'emoji', content: emojiMatch[1].trim() });
-            lastIndex = emojiMatch.index + emojiMatch[0].length;
+
+            if (match[1]) {
+                // Sticker
+                parts.push({ type: 'emoji', content: match[2].trim() });
+            } else if (match[3]) {
+                // URL
+                parts.push({ type: 'silent', content: match[3].trim() });
+            } else {
+                // Other tags
+                parts.push({ type: 'silent', content: match[0].trim() });
+            }
+            lastIndex = match.index + match[0].length;
         }
 
         if (lastIndex < content.length) {
@@ -873,8 +936,11 @@ export const ChatParser = {
     // Primary: split on line breaks (AI decides where to break)
     // Secondary: split on Chinese punctuation if text is long (force bubble split)
     chunkText: (text: string): string[] => {
+        // Normalize literal \n strings to actual newlines (defensive fix for LLM being too literal)
+        const normalizedText = text.replace(/\\n/g, '\n');
+
         // 1. Try line breaks first
-        let chunks = text.split(/(?:\r\n|\r|\n|\u2028|\u2029)+/)
+        let chunks = normalizedText.split(/(?:\r\n|\r|\n|\u2028|\u2029)+/)
             .map(c => c.trim())
             .filter(c => c.length > 0);
 

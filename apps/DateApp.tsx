@@ -7,6 +7,7 @@ import { processImage } from '../utils/file';
 import { CharacterProfile, SpriteConfig, Message } from '../types';
 import { ContextBuilder } from '../utils/context';
 import Modal from '../components/os/Modal';
+import { resolveApiEndpoint } from '../utils/apiResolver';
 
 // 标准情绪列表 (Key必须是小写)
 const REQUIRED_EMOTIONS = ['normal', 'happy', 'angry', 'sad', 'shy'];
@@ -284,17 +285,20 @@ ${recentMsgs}
 
 (Start sensing...)`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
+            const resolved = resolveApiEndpoint(apiConfig);
+            let requestBody: any = {
                     model: apiConfig.model,
                     messages: [
                         { role: "system", content: baseContext },
                         { role: "user", content: peekInstructions + "\n\n" + userTrigger }
                     ],
                     temperature: 0.85
-                })
+                };
+            if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
+            const response = await fetch(resolved.chatUrl, {
+                method: 'POST',
+                headers: resolved.headers,
+                body: JSON.stringify(requestBody)
             });
 
             if (!response.ok) throw new Error('Failed to sense presence');
@@ -452,14 +456,17 @@ ${recentMsgs}
                 { role: 'user', content: `${userMsg} (System Note: 用户就在你面前，请直接互动，描写你的动作和神态。)` }
             ];
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
+            const resolved2 = resolveApiEndpoint(apiConfig);
+            let vnBody: any = {
                     model: apiConfig.model,
                     messages: apiMessages,
                     temperature: 0.85
-                })
+                };
+            if (resolved2.transformBody) vnBody = resolved2.transformBody(vnBody);
+            const response = await fetch(resolved2.chatUrl, {
+                method: 'POST',
+                headers: resolved2.headers,
+                body: JSON.stringify(vnBody)
             });
 
             if (!response.ok) throw new Error('API Error');

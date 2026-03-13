@@ -11,6 +11,8 @@ import { XhsMcpClient } from '../utils/xhsMcpClient';
 import { SearchTool } from '../utils/searchTool';
 import { syncWorkspaceFromDisk } from '../utils/workspaceSync';
 import { DB } from '../utils/db';
+import { resolveApiEndpoint, API_SOURCE_REGISTRY } from '../utils/apiResolver';
+import type { ApiSource } from '../types';
 
 const Settings: React.FC = () => {
     const {
@@ -28,6 +30,7 @@ const Settings: React.FC = () => {
     const [isLoadingModels, setIsLoadingModels] = useState(false);
     const [newPresetName, setNewPresetName] = useState('');
     const [showApiKey, setShowApiKey] = useState(false);
+    const [localApiSource, setLocalApiSource] = useState<ApiSource>(apiConfig.apiSource || 'openai_compatible');
 
     // UI States
     const [showModelModal, setShowModelModal] = useState(false);
@@ -91,6 +94,7 @@ const Settings: React.FC = () => {
         setLocalUrl(apiConfig.baseUrl);
         setLocalKey(apiConfig.apiKey);
         setLocalModel(apiConfig.model);
+        setLocalApiSource(apiConfig.apiSource || 'openai_compatible');
         setLocalWorkspacePath(apiConfig.nativeWorkspacePath || '');
         setLocalGalleryPath(apiConfig.galleryWorkspacePath || '');
         setVideoMaxFrames(apiConfig.videoUnderstanding?.maxFrames || 10);
@@ -109,6 +113,7 @@ const Settings: React.FC = () => {
         setLocalUrl(preset.config.baseUrl);
         setLocalKey(preset.config.apiKey);
         setLocalModel(preset.config.model);
+        setLocalApiSource((preset.config as any).apiSource || 'openai_compatible');
         setVideoMaxFrames(preset.config.videoUnderstanding?.maxFrames || 10);
         setVideoProviderMode(preset.config.videoUnderstanding?.providerMode || 'auto');
         setVideoNativeFirst(preset.config.videoUnderstanding?.nativeFirst ?? true);
@@ -148,6 +153,7 @@ const Settings: React.FC = () => {
             apiKey: localKey,
             baseUrl: localUrl,
             model: localModel,
+            apiSource: localApiSource,
             nativeWorkspacePath: localWorkspacePath,
             galleryWorkspacePath: localGalleryPath,
             videoUnderstanding: {
@@ -201,38 +207,23 @@ const Settings: React.FC = () => {
         setIsLoadingModels(true);
         setStatusMsg('正在连接...');
         try {
-            const baseUrl = localUrl.replace(/\/+$/, '');
-            let fetchUrl = `${baseUrl}/models`;
+            // Use the centralized resolver to get the correct models URL and headers
+            const resolved = resolveApiEndpoint({
+                ...apiConfig,
+                baseUrl: localUrl,
+                apiKey: localKey,
+                apiSource: localApiSource
+            });
 
-            // 特殊处理：Google Gemini 原生 API 路径修正
-            if (baseUrl.includes('generativelanguage.googleapis.com') && !baseUrl.includes('openai')) {
-                fetchUrl = `${baseUrl}/openai/models`;
-            }
-
-            // 开发环境代理适配：火山引擎 (解决本地开发 CORS)
-            // 仅当用户输入原始火山 URL 且当前是开发环境(localhost)时生效
-            if (window.location.hostname === 'localhost' && baseUrl.includes('ark.cn-beijing.volces.com')) {
-                const proxyPath = '/api/proxy/volcengine';
-                // 替换原始 host 为本地代理路径
-                // e.g. https://ark.cn-beijing.volces.com/api/v3 -> /api/proxy/volcengine/api/v3
-                const relativePath = baseUrl.replace('https://ark.cn-beijing.volces.com', '');
-                fetchUrl = `${proxyPath}${relativePath}/models`;
-                console.log(`[DevProxy] Redirecting to: ${fetchUrl}`);
-            }
-
-            const response = await fetch(fetchUrl, {
+            const response = await fetch(resolved.modelsUrl, {
                 method: 'GET',
-                headers: { 'Authorization': `Bearer ${localKey}`, 'Content-Type': 'application/json' }
+                headers: resolved.headers
             });
 
             if (!response.ok) {
-                // 如果是 404，可能是因为厂商不支持 /models 列表 (如火山引擎、Azure 等)
-                // 或者是 CORS 问题 (如浏览器端调用)
-                // 此时不应报错阻断，而是提示用户手动输入
                 if (response.status === 404 || response.status === 405) {
                     setStatusMsg('列表接口不支持，请手动输入');
                     setAvailableModels([]);
-                    // 即使获取失败，也允许用户打开选择框（此时选择框应该变成可输入状态或显示提示）
                     setShowModelModal(true);
                     return;
                 }
@@ -240,19 +231,17 @@ const Settings: React.FC = () => {
             }
 
             const data = await response.json();
-            // Support various API response formats
             const list = data.data || data.models || [];
             if (Array.isArray(list)) {
                 const models = list.map((m: any) => m.id || m);
                 setAvailableModels(models);
                 if (models.length > 0 && !models.includes(localModel)) setLocalModel(models[0]);
                 setStatusMsg(`获取到 ${models.length} 个模型`);
-                setShowModelModal(true); // Open selector immediately
+                setShowModelModal(true);
             } else { setStatusMsg('格式不兼容'); }
         } catch (error: any) {
             console.error(error);
             setStatusMsg('连接失败，请手动输入');
-            // 失败时也打开，方便用户手动输入
             setAvailableModels([]);
             setShowModelModal(true);
         } finally {
@@ -626,9 +615,37 @@ const Settings: React.FC = () => {
                     )}
 
                     <div className="space-y-4">
+                        {/* API Source Selector */}
+                        <div className="group">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">接口来源 (API Source)</label>
+                            <select
+                                value={localApiSource}
+                                onChange={(e) => {
+                                    const newSource = e.target.value as ApiSource;
+                                    setLocalApiSource(newSource);
+                                    const meta = API_SOURCE_REGISTRY[newSource];
+                                    // Auto-fill URL with default if changed to an official source and URL is empty or was a previous default
+                                    if (meta?.defaultBaseUrl) {
+                                        const currentIsDefault = Object.values(API_SOURCE_REGISTRY).some(m => m.defaultBaseUrl === localUrl);
+                                        if (!localUrl || currentIsDefault) {
+                                            setLocalUrl(meta.defaultBaseUrl);
+                                        }
+                                    }
+                                }}
+                                className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm focus:bg-white transition-all appearance-none cursor-pointer"
+                            >
+                                {Object.entries(API_SOURCE_REGISTRY).map(([key, meta]) => (
+                                    <option key={key} value={key}>{meta.label}</option>
+                                ))}
+                            </select>
+                            <p className="text-[10px] text-slate-400 mt-1 px-1">
+                                {API_SOURCE_REGISTRY[localApiSource]?.description || ''}
+                            </p>
+                        </div>
+
                         <div className="group">
                             <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block pl-1">URL</label>
-                            <input type="text" value={localUrl} onChange={(e) => setLocalUrl(e.target.value)} placeholder="https://..." className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
+                            <input type="text" value={localUrl} onChange={(e) => setLocalUrl(e.target.value)} placeholder={API_SOURCE_REGISTRY[localApiSource]?.placeholder || 'https://...'} className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-2.5 text-sm font-mono focus:bg-white transition-all" />
                         </div>
 
                         <div className="group">

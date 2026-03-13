@@ -6,6 +6,7 @@ import { DB } from '../utils/db';
 import { Task, Anniversary, AgentProfile } from '../types';
 import Modal from '../components/os/Modal';
 import { ContextBuilder } from '../utils/context';
+import { resolveApiEndpoint } from '../utils/apiResolver';
 
 type ThemeMode = 'cyber' | 'soft' | 'minimal';
 
@@ -155,15 +156,18 @@ const ScheduleApp: React.FC = () => {
                 { role: "user", content: userPrompt }
             ];
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
+            const resolved = resolveApiEndpoint(apiConfig);
+            let requestBody: any = {
                     model: apiConfig.model,
                     messages: messages,
                     temperature: 0.9,
                     max_tokens: 2000
-                })
+                };
+            if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
+            const response = await fetch(resolved.chatUrl, {
+                method: 'POST',
+                headers: resolved.headers,
+                body: JSON.stringify(requestBody)
             });
 
             if (!response.ok) {
@@ -238,15 +242,18 @@ const ScheduleApp: React.FC = () => {
         ];
 
         try {
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
+            const resolved = resolveApiEndpoint(apiConfig);
+            let requestBody: any = {
                     model: apiConfig.model,
                     messages: messages,
                     temperature: 0.8,
                     max_tokens: 2000
-                })
+                };
+            if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
+            const response = await fetch(resolved.chatUrl, {
+                method: 'POST',
+                headers: resolved.headers,
+                body: JSON.stringify(requestBody)
             });
 
             if (!response.ok) {

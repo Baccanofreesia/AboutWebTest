@@ -13,8 +13,9 @@
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { CronJob } from '../types';
+import { CronJob, APIConfig } from '../types';
 import { DB } from '../utils/db';
+import { resolveApiEndpoint } from '../utils/apiResolver';
 
 // --- Simple Cron Expression Matcher ---
 // Supports: minute hour dayOfMonth month dayOfWeek  (5-field, * and numbers only)
@@ -67,7 +68,7 @@ function shouldFire(job: CronJob, now: Date): boolean {
 }
 
 export interface UseCronEngineOptions {
-    apiConfig: { baseUrl: string; apiKey: string; model: string };
+    apiConfig: APIConfig;
     agentName: string;
     userName: string;
     onCronMessage: (content: string) => void;  // callback to push assistant message to chat
@@ -108,17 +109,20 @@ export function useCronEngine(opts: UseCronEngineOptions) {
             const now = new Date();
             const systemPrompt = `You are ${agentName}. Current time: ${now.toLocaleString()}. The user is ${userName}. You are executing a scheduled task. Respond naturally as if you are the AI companion proactively reaching out.`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({
+            const resolved = resolveApiEndpoint(apiConfig);
+            let requestBody: any = {
                     model: apiConfig.model,
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: `[CRON TASK: ${job.name}]\n${job.prompt}` },
                     ],
                     temperature: 0.7,
-                }),
+                };
+            if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
+            const response = await fetch(resolved.chatUrl, {
+                method: 'POST',
+                headers: resolved.headers,
+                body: JSON.stringify(requestBody),
             });
 
             if (response.ok) {
