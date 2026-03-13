@@ -587,13 +587,17 @@ const ProfileOnboarding: React.FC<ProfileOnboardingProps> = ({ isOpen, onComplet
         try {
             setIsOptimizing(true);
             const prompt = [
-                '这是一个角色设定，请你在不新增事实的前提下优化表达，使其更清晰、可执行、风格统一。',
-                '要求：保持原意，不添加新设定；输出纯文本，不要标题；结果可直接替换人设段落。',
+                '任务：在不新增事实的前提下优化角色设定，提升清晰度与可执行性。',
+                '输出要求：',
+                '1. 结构化：用编号条目或小标题分段（如「身份」「气质」「说话方式」「关系定位」「边界/禁忌」），每段 1-4 行。',
+                '2. 严格保留原意，不新增设定。',
+                '3. 提及用户时统一使用“User”。',
+                '4. 输出纯文本，不要加额外标题或前言，结果可直接替换原人设。',
                 '',
                 '角色设定原文：',
                 sourceText
             ].join('\n');
-            const refined = await askAgent(prompt, 'You are a concise persona editor that improves clarity and actionability without adding facts.');
+            const refined = await askAgent(prompt, 'You are a structured persona editor. Preserve meaning, add no facts, and always refer to the user as "User".');
             const cleaned = refined.trim();
             if (cleaned) {
                 setAgentDirty(true);
