@@ -60,19 +60,25 @@ const stripParensPreservingTags = (text: string): string => {
         });
 };
 
-/** Clean text for TTS */
+/** Clean text for TTS - Strips emojis and technical tags */
 export const cleanTextForTts = (raw: string): string => {
+    // 1. Extract content from <语音> tag if present
     const voiceTagMatch = raw.match(/<[语語]音>([\s\S]*?)<\/[语語]音>/);
-    if (voiceTagMatch) {
-        return stripParensPreservingTags(voiceTagMatch[1]).replace(/\s+/g, ' ').trim();
-    }
-    let text = raw;
+    let text = voiceTagMatch ? voiceTagMatch[1] : raw;
+
+    // 2. Clear known technical tags and markers
     text = text.replace(/\[\[.*?\]\]/g, '');
     text = text.replace(/%%BILINGUAL%%[\s\S]*/i, '');
-    text = stripParensPreservingTags(text);
     text = text.replace(/<[语語]音>[\s\S]*?<\/[语語]音>/g, '');
-    text = text.replace(/\s+/g, ' ').trim();
-    return text;
+    
+    // 3. Strip parentheticals and polish
+    text = stripParensPreservingTags(text);
+    
+    // 4. Strip Unicode Emojis (safety fallback)
+    // Common emoji range: https://stackoverflow.com/questions/43242440/javascript-regular-expression-for-unicode-emojis
+    text = text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
+    
+    return text.replace(/\s+/g, ' ').trim();
 };
 
 /** Insert native MiniMax pauses */

@@ -64,7 +64,7 @@ const VoiceDesignerApp: React.FC = () => {
     }
     const existingVoiceId = selectedChar?.voiceProfile?.voiceId;
     if (existingVoiceId) {
-      return [{ id: 'init-0', voice_id: existingVoiceId, voice_name: selectedChar?.voiceProfile?.voiceName || '', weight: 1 }];
+      return [{ id: 'init-0', voice_id: existingVoiceId, voice_name: (selectedChar?.voiceProfile as any)?.voiceName || '', weight: 1 }];
     }
     return [];
   });

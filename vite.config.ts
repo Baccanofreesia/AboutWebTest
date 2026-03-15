@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { exec } from 'child_process';
 
 const expandHome = (input: string) => {
@@ -22,6 +23,73 @@ function fsProxyPlugin() {
   return {
     name: 'fs-proxy',
     configureServer(server: any) {
+      server.middlewares.use('/api/asr', (req: any, res: any, next: any) => {
+        if (req.method !== 'POST') return next();
+        let body = '';
+        req.on('data', (chunk: any) => { body += chunk.toString(); });
+        req.on('end', async () => {
+          const tempFiles: string[] = [];
+          const execAsync = (command: string) => new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+            exec(command, { windowsHide: true }, (error, stdout, stderr) => {
+              if (error) reject({ error, stdout, stderr });
+              else resolve({ stdout, stderr });
+            });
+          });
+          const tryParseJson = (raw: string) => {
+            const trimmed = String(raw || '').trim();
+            if (!trimmed) return null;
+            try { return JSON.parse(trimmed); } catch { return null; }
+          };
+          try {
+            const { base64, filename, engine, model, language, noPolish } = JSON.parse(body || '{}');
+            if (!base64) {
+              res.statusCode = 400;
+              return res.end(JSON.stringify({ success: false, error: 'missing base64' }));
+            }
+            const safeName = (filename || 'audio.webm').toString().replace(/[^\w.\-]+/g, '_');
+            const tmpPath = path.join(os.tmpdir(), `${Date.now()}_${Math.random().toString(36).slice(2)}_${safeName}`);
+            tempFiles.push(tmpPath);
+            await fs.promises.writeFile(tmpPath, Buffer.from(base64, 'base64'));
+            let stdout = '';
+            if (engine === 'faster-whisper') {
+              const scriptPath = path.resolve(__dirname, '..', 'workspace', 'skills', 'faster-whisper', 'scripts', 'transcribe.py');
+              if (!fs.existsSync(scriptPath)) {
+                res.statusCode = 500;
+                return res.end(JSON.stringify({ success: false, error: 'faster-whisper script not found' }));
+              }
+              const langArg = language ? ` --language ${language}` : '';
+              const modelArg = model ? ` --model ${model}` : '';
+              const cmd = `python "${scriptPath}" "${tmpPath}" --json --quiet${modelArg}${langArg}`;
+              const result = await execAsync(cmd);
+              stdout = result.stdout || '';
+            } else {
+              const modelArg = model ? ` --model ${model}` : '';
+              const noPolishArg = noPolish ? ' --no-polish' : '';
+              const cmd = `coli asr "${tmpPath}"${modelArg}${noPolishArg}`;
+              try {
+                const result = await execAsync(cmd);
+                stdout = result.stdout || '';
+              } catch (err: any) {
+                const fallback = `coli asr "${tmpPath}"${modelArg}`;
+                const result = await execAsync(fallback);
+                stdout = result.stdout || '';
+              }
+            }
+            const parsed = tryParseJson(stdout);
+            const text = parsed?.text || parsed?.transcript || parsed?.result || (Array.isArray(parsed?.segments) ? parsed.segments.map((s: any) => s.text || '').join('') : '') || stdout;
+            const emotion = parsed?.emotion || parsed?.meta?.emotion || '';
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ success: true, text: String(text || '').trim(), emotion }));
+          } catch (e: any) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ success: false, error: e?.message || 'asr failed' }));
+          } finally {
+            for (const f of tempFiles) {
+              try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch { }
+            }
+          }
+        });
+      });
       server.middlewares.use('/api/fs', (req: any, res: any, next: any) => {
         if (req.method !== 'POST') return next();
 
@@ -238,6 +306,20 @@ export default defineConfig({
         changeOrigin: true,
         secure: true,
         rewrite: () => '/v1/get_voice',
+      },
+      '/api/minimax/ws': {
+        target: 'https://api.minimaxi.com',
+        changeOrigin: true,
+        secure: true,
+        ws: true,
+        rewrite: () => '/ws/v1/t2a_v2',
+        configure: (proxy: any) => {
+          proxy.on('proxyReqWs', (proxyReq: any, req: any) => {
+            const url = new URL(req.url || '', 'http://localhost');
+            const auth = url.searchParams.get('authorization') || url.searchParams.get('Authorization');
+            if (auth) proxyReq.setHeader('Authorization', auth);
+          });
+        },
       },
     }
   },

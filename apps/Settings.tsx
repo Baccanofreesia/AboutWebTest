@@ -827,6 +827,7 @@ const Settings: React.FC = () => {
                     </div>
                 </section>
 
+
                 {/* 抽帧设置区域 */}
                 <section className="bg-white/60 backdrop-blur-sm rounded-3xl p-5 shadow-sm border border-white/50">
                     <div className="flex items-center gap-2 mb-4">

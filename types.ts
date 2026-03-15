@@ -87,6 +87,8 @@ export interface APIConfig {
     baseUrl: string;
     apiKey: string;
     model: string;
+    callPauseThreshold?: number; // VAD debounce in ms (call only)
+    callSegmentDuration?: number; // max voice chunk duration in ms (call only)
     nativeWorkspacePath?: string; // e.g. 'D:\\MyWork\\Mydevelop\\MyBot'
     galleryWorkspacePath?: string; // e.g. 'D:\\MyWork\\Mydevelop\\MyBot\\Photos'
     securityPolicy?: SecurityPolicy;
@@ -246,6 +248,7 @@ export interface AgentProfile {
     hideSystemLogs?: boolean;
     hideBeforeMessageId?: number;
     xhsEnabled?: boolean;
+    callInitiative?: number;
 
     // TTS & Voice
     chatVoiceEnabled?: boolean;             // Double-layer control switch
@@ -290,6 +293,7 @@ export type CharacterExportData = AgentExportData;
 export interface UserProfile {
     name: string;                           // Real name (used in Agent prompt context)
     nickname?: string;                      // Display nickname in chat (like QQ/Discord)
+    preferredNames?: string[];              // Preferred forms of address
     avatar: string;                         // Default avatar
     displayAvatar?: string;                 // Chat display avatar (e.g. couple avatar)
     bio: string;                            // Sent to AI as user context
@@ -424,6 +428,34 @@ export interface SecurityPolicy {
 }
 
 // --- Full Backup ---
+
+// --- Call System ---
+
+export type CallState = 'idle' | 'dialing' | 'ringing' | 'connected' | 'thinking' | 'speaking';
+export type CallDirection = 'user_outgoing' | 'agent_outgoing';
+export type CallInputMode = 'voice' | 'text';
+
+export type CallBubble = {
+    id: string;
+    role: 'user' | 'assistant';
+    text: string;
+    timestamp: number;
+    audioUrl?: string;
+    audioDuration?: number;
+    audioProgress?: number;
+    streaming?: boolean;
+};
+
+export interface CallActions {
+    onAccept: () => void;
+    onDecline: () => void;
+    onHangup: () => void;
+    onCancelOutgoing: () => void;
+    onToggleMute: () => void;
+    onToggleInputMode: () => void;
+    onSendText: () => void;
+    onChangeInput: (val: string) => void;
+}
 
 export interface FullBackupData {
     timestamp: number;

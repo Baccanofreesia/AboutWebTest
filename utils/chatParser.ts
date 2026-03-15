@@ -3,7 +3,7 @@ import { LocalNotifications } from '@capacitor/local-notifications';
 import { fsBridge } from './fsBridge';
 import { syncWorkspaceFromDisk } from './workspaceSync';
 import { fileExt, inferMimeTypeByName } from './chatFiles';
-import { synthesizeSpeech } from './ttsService';
+import { synthesizeSpeech, cleanTextForTts } from './ttsService';
 import { AgentProfile } from '../types';
 
 const failedImageDownloads: Record<string, number> = {};
@@ -19,7 +19,10 @@ export const ChatParser = {
             return false;
         }
         try {
-            const audioBlob = await synthesizeSpeech(text, char, apiConfig);
+            const cleanedText = cleanTextForTts(text);
+            if (!cleanedText) return false;
+            
+            const audioBlob = await synthesizeSpeech(cleanedText, char, apiConfig);
             const base64 = await new Promise<string>((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = () => {
@@ -256,7 +259,7 @@ export const ChatParser = {
                         folderSummary.push(`${folder.name}:${count}`);
                     }
                     const summary = `[Tool Result (gallery_scan)]: 根目录=${rootCount} 张; 相册集=${folderSummary.join(', ') || '无'}`;
-                    await DB.saveMessage({ charId, role: 'system', type: 'text', content: summary });
+                    await DB.saveMessage({ charId, role: 'system', type: 'text', content: summary } as any);
                     hasToolResult = true;
                 } catch (e: any) {
                     await DB.saveMessage({ charId, role: 'system', type: 'text', content: `[Tool Error (gallery_scan)]: ${e.message}` });
@@ -824,12 +827,20 @@ export const ChatParser = {
      */
     sanitize: (text: string): string => {
         return text
+            // Strip <think>/<analysis> blocks (chain-of-thought) entirely
+            .replace(/<\s*(?:think|analysis)[^>]*>[\s\S]*?<\/\s*(?:think|analysis)\s*>/gi, '')
+            .replace(/<\/?\s*(?:think|analysis)\s*>/gi, '')
+            // Strip meta tool-intent lines like "让我先读取文件..."
+            .replace(/^\s*(?:让我先|我先|先|需要先|我需要先).*(?:读取|查看).*(?:文件|资料|文档).*$/gmi, '')
             // Strip leaked timestamps from chat history context:
             // [2026-02-11 13:52] / [2026/2/11 13:52] / [2026.02.11 13:52] (bracketed)
             .replace(/\[\s*\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*\]\s*/g, '')
             .replace(/\[\s*\d{1,2}:\d{2}(?::\d{2})?\s*\]\s*/g, '')
             // Strip simulated thinking time markers like [1s], [2.5s], [300ms]
             .replace(/\[\s*\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|second|seconds|毫秒|秒)\s*\]\s*/gi, '')
+            // Strip bracketed tool calls like [fs_read file="..."]
+            .replace(/^\s*\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_execute)[^\]]*\]\s*$/gmi, '')
+            .replace(/\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_execute)[^\]]*\]/gi, '')
             // 2026-02-11 13:52 format (unbracketed, at line start)
             .replace(/^\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*/gm, '')
             .replace(/\(\s*\d{1,2}:\d{2}(?::\d{2})?\s*\)/g, '')
@@ -874,6 +885,9 @@ export const ChatParser = {
      */
     hasDisplayContent: (text: string): boolean => {
         const stripped = text
+            .replace(/<\s*(?:think|analysis)[^>]*>[\s\S]*?<\/\s*(?:think|analysis)\s*>/gi, '')
+            .replace(/<\/?\s*(?:think|analysis)\s*>/gi, '')
+            .replace(/^\s*(?:让我先|我先|先|需要先|我需要先).*(?:读取|查看).*(?:文件|资料|文档).*$/gmi, '')
             .replace(/%%BILINGUAL%%/gi, '')
             .replace(/%%TRANS%%[\s\S]*/gi, '')
             .replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '')
@@ -884,6 +898,8 @@ export const ChatParser = {
             .replace(/(^|\s)`(\s|$)/gm, '$1$2')
             .replace(/<fs_write\s+target="[^"]+">[\s\S]*?<\/fs_write>/gi, '')
             .replace(/<fs_(?:ls|read|delete|execute)\s+(?:dir|file)="[^"]+"\s*\/>/gi, '')
+            .replace(/^\s*\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_execute)[^\]]*\]\s*$/gmi, '')
+            .replace(/\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_execute)[^\]]*\]/gi, '')
             .replace(/\[\[[\s\S]*?\]\]/g, '')
             .replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, '')
             .replace(/\[回复\s*[""\u201C][^""\u201D]*?[""\u201D](?:\.{0,3})\]\s*[：:]?\s*/g, '')

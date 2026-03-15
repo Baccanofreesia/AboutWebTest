@@ -1,5 +1,4 @@
 
-
 import React, { useEffect, ErrorInfo, useState, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
@@ -25,6 +24,7 @@ import { StatusBar as CapStatusBar } from '@capacitor/status-bar';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import ProfileOnboarding from './os/ProfileOnboarding';
 import { needsProfileOnboarding } from '../utils/onboarding';
+import CallOverlay from './chat/CallOverlay';
 
 // --- Dynamic Agent Apps Registry ---
 const agentModules = (import.meta as any).glob('../apps/agent_apps/*.tsx');
@@ -35,7 +35,6 @@ for (const path in agentModules) {
     AgentAppMap[fileName] = React.lazy(agentModules[path] as any);
   }
 }
-console.log("PhoneShell loaded AgentAppMap with keys:", Object.keys(AgentAppMap));
 
 // --- Agent App Error Boundary ---
 class AgentErrorBoundary extends React.Component<{ appName: string, agentName?: string, onCloseApp: () => void, children: React.ReactNode }, { hasError: boolean, errorMessage: string }> {
@@ -50,16 +49,8 @@ class AgentErrorBoundary extends React.Component<{ appName: string, agentName?: 
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error(`Agent App [${this.props.appName}] crashed:`, error, errorInfo);
-
-    // Silently report to DB so the Agent can see the crash log and auto-fix it
     const crashLog = `[系统: 你开发的 App "${this.props.appName}" 运行时发生了崩溃！请检查并使用 <create_app> 重新发布修复版本。]\n[报错信息]: ${error.message}\n[堆栈]: ${errorInfo.componentStack}`;
-
-    // We don't have the active charId easily here since PhoneShell is global, 
-    // but we can query the active char or simply broadcast to the chat system.
-    // For now, we will save it to the DB attached to the currently active character if possible.
-    // Alternatively, we save it with charId: localStorage.getItem('activeCharId') || '1'
     const activeCharId = localStorage.getItem('nova_active_char_id') || '1';
-
     DB.saveMessage({
       charId: activeCharId,
       role: 'system',
@@ -107,7 +98,7 @@ const AgentAppWrapper: React.FC<{ appName: string, onClose: () => void, children
   );
 };
 
-// Lazy placeholder for CheckPhoneApp (will be created in Phase 2.5)
+// Lazy placeholder for CheckPhoneApp
 const CheckPhonePlaceholder: React.FC = () => {
   const { closeApp } = useOS();
   return (
@@ -122,8 +113,22 @@ const CheckPhonePlaceholder: React.FC = () => {
   );
 };
 
+const formatCallDuration = (seconds: number) => {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+};
+
 const PhoneShell: React.FC = () => {
-  const { theme, isLocked, unlock, activeApp, closeApp, virtualTime, isDataLoaded, toasts, apiConfig, agent } = useOS();
+  const { 
+    theme, isLocked, unlock, activeApp, closeApp, virtualTime, isDataLoaded, toasts, apiConfig, agent, 
+    suspendedCall, resumeCall,
+    callState, callDirection, showCallOverlay, setShowCallOverlay, callBubbles, callElapsed, callActionsRef,
+    callInput, callInputMode, callMicMuted, callMicActive, callVolumeLevel
+  } = useOS();
+  
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [booting, setBooting] = useState(false);
   const [bootProgress, setBootProgress] = useState(0);
@@ -141,13 +146,10 @@ const PhoneShell: React.FC = () => {
         if (permStatus.display !== 'granted') {
           await LocalNotifications.requestPermissions();
         }
-      } catch (e) {
-        // Likely running in browser, ignore
-      }
+      } catch (e) { }
     };
     initNative();
 
-    // Handle Android Hardware Back Button
     const setupBackButton = async () => {
       try {
         await CapApp.removeAllListeners();
@@ -158,16 +160,12 @@ const PhoneShell: React.FC = () => {
             CapApp.exitApp();
           }
         });
-      } catch (e) { console.log('Back button listener setup failed (not native)'); }
+      } catch (e) { }
     };
 
     setupBackButton();
 
-    // Listen for Agent App Deployment
-    const handleAppDeployed = () => {
-      console.log('New Agent App deployed, soft reloading to update Vite glob registry...');
-      window.location.reload();
-    };
+    const handleAppDeployed = () => window.location.reload();
     window.addEventListener('agent_app_deployed', handleAppDeployed);
 
     return () => {
@@ -190,6 +188,7 @@ const PhoneShell: React.FC = () => {
     let intervalId: ReturnType<typeof setInterval> | null = null;
     let completeTimeout: ReturnType<typeof setTimeout> | null = null;
     let safetyTimeout: ReturnType<typeof setTimeout> | null = null;
+    
     const run = async () => {
       const useOverlay = false;
       if (useOverlay) {
@@ -257,16 +256,8 @@ const PhoneShell: React.FC = () => {
     };
   }, [apiConfig, isDataLoaded, isLocked, showOnboarding]);
 
-  useEffect(() => {
-    return () => {
-      if (unlockIntervalRef.current) clearInterval(unlockIntervalRef.current);
-      if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
-    };
-  }, []);
-
   const beginUnlock = () => {
-    if (!isDataLoaded) return;
-    if (lockBooting) return;
+    if (!isDataLoaded || lockBooting) return;
     setLockBooting(true);
     setLockBootProgress(8);
     const duration = 1000 + Math.round(Math.random() * 1000);
@@ -295,7 +286,6 @@ const PhoneShell: React.FC = () => {
   const bgImageValue = getBgStyle(theme.wallpaper);
   const contentColor = theme.contentColor || '#ffffff';
 
-  // --- Lock Screen ---
   if (isLocked) {
     return (
       <div
@@ -326,7 +316,6 @@ const PhoneShell: React.FC = () => {
             <div className="relative w-[82%] max-w-[340px] rounded-[28px] border border-white/12 bg-[linear-gradient(180deg,rgba(16,16,16,0.85),rgba(8,8,8,0.9))] shadow-[0_0_40px_rgba(0,0,0,0.35)] backdrop-blur-2xl px-6 py-6 text-white overflow-hidden">
               <div className="pointer-events-none absolute inset-0 opacity-[0.15] bg-[linear-gradient(90deg,rgba(255,255,255,0.08)_1px,transparent_1px),linear-gradient(180deg,rgba(255,255,255,0.06)_1px,transparent_1px)] bg-[size:16px_16px]" />
               <div className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-[linear-gradient(180deg,rgba(255,255,255,0.12),transparent)]" />
-
               <div className="flex items-center justify-between text-[10px] tracking-[0.35em] uppercase opacity-70">
                 <span>Unlocking</span>
                 <span className="tabular-nums">{lockBootProgress}%</span>
@@ -349,11 +338,10 @@ const PhoneShell: React.FC = () => {
     );
   }
 
-  // --- App Router ---
   const renderApp = () => {
     switch (activeApp) {
       case AppID.Settings: return <Settings />;
-      case AppID.Chat: return null; // Chat is rendered separately to maintain background state
+      case AppID.Chat: return null;
       case AppID.CheckPhone: return <CheckPhoneApp />;
       case AppID.ThemeMaker: return <ThemeMaker />;
       case AppID.Appearance: return <Appearance />;
@@ -386,7 +374,6 @@ const PhoneShell: React.FC = () => {
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-gradient-to-br from-blue-100 via-violet-100 to-indigo-100 text-slate-900 font-sans select-none">
-      {/* Wallpaper Layer */}
       <div
         className="absolute inset-0 bg-cover bg-center transition-all duration-700 ease-[cubic-bezier(0.25,0.1,0.25,1)]"
         style={{
@@ -396,32 +383,52 @@ const PhoneShell: React.FC = () => {
           filter: activeApp !== AppID.Launcher ? 'blur(10px)' : 'blur(0px)',
         }}
       />
-
-      {/* App Background Overlay (Glass Effect) */}
       <div className={`absolute inset-0 transition-all duration-500 ${activeApp === AppID.Launcher ? 'bg-transparent' : 'bg-white/50 backdrop-blur-3xl'}`} />
-
       <div className="relative z-10 w-full h-full flex flex-col">
         <StatusBar />
+        {/* Call Overlay (Global) */}
+        <CallOverlay
+          visible={showCallOverlay}
+          callState={callState}
+          callDirection={callDirection}
+          callStatusLabel={callState === 'connected' ? '进行中' : (callState === 'dialing' || callState === 'ringing' ? '等待中' : '通话结束')}
+          callStartedAt={0}
+          callElapsed={callElapsed}
+          charDisplayName={agent?.nickname || agent?.name || 'Agent'}
+          charDisplayAvatar={agent?.displayAvatar || agent?.avatar || ''}
+          callBubbles={callBubbles}
+          callInputMode={callInputMode}
+          callInput={callInput}
+          callBusy={callState !== 'idle' && callState !== 'connected'}
+          callMicMuted={callMicMuted}
+          callMicActive={callMicActive}
+          callVolumeLevel={callVolumeLevel}
+          formatDuration={formatCallDuration}
+          scrollRef={{ current: null } as any}
+          onChangeInput={(val) => callActionsRef.current?.onChangeInput(val)}
+          onSendText={() => callActionsRef.current?.onSendText()}
+          onToggleInputMode={() => callActionsRef.current?.onToggleInputMode()}
+          onToggleMute={() => callActionsRef.current?.onToggleMute()}
+          onMinimize={() => setShowCallOverlay(false)}
+          onCancelOutgoing={() => callActionsRef.current?.onHangup()}
+          onAcceptIncoming={() => callActionsRef.current?.onAccept()}
+          onDeclineIncoming={() => callActionsRef.current?.onHangup()}
+          onHangup={() => callActionsRef.current?.onHangup()}
+        />
         <div className="flex-1 relative overflow-hidden flex flex-col">
-          {/* Always mount Chat to keep AI engine running, hide when inactive */}
           <div className={`absolute inset-0 ${activeApp === AppID.Chat ? 'z-20 flex flex-col' : 'z-0 hidden'}`}>
             <Chat />
           </div>
-          {/* Render other apps */}
           {activeApp !== AppID.Chat && (
             <div className="absolute inset-0 z-20 flex flex-col">
               {renderApp()}
             </div>
           )}
         </div>
-
-        {/* Home Indicator */}
         <div className="absolute bottom-0 left-0 w-full h-6 flex justify-center items-end pb-2 z-50 pointer-events-none">
           <div className="w-32 h-1 bg-slate-900/10 rounded-full backdrop-blur-md"></div>
         </div>
       </div>
-
-      {/* System Toasts */}
       <div className="absolute top-12 left-0 w-full flex flex-col items-center gap-2 pointer-events-none z-[60]">
         {toasts.map(toast => (
           <div key={toast.id} className="animate-fade-in bg-white/95 backdrop-blur-xl px-4 py-3 rounded-2xl shadow-xl border border-black/5 flex items-center gap-3 max-w-[85%] ring-1 ring-white/20">
@@ -432,9 +439,7 @@ const PhoneShell: React.FC = () => {
           </div>
         ))}
       </div>
-
       {booting && null}
-
       <ProfileOnboarding
         isOpen={showOnboarding}
         onComplete={() => {

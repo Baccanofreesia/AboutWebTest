@@ -13,6 +13,8 @@ interface ChatModalsProps {
     setSettingsContextLimit: (v: number) => void;
     settingsHideSysLogs: boolean;
     setSettingsHideSysLogs: (v: boolean) => void;
+    settingsCallInitiative: number;
+    setSettingsCallInitiative: (v: number) => void;
     preserveContext: boolean;
     setPreserveContext: (v: boolean) => void;
     editContent: string;
@@ -58,6 +60,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     emojiImportText, setEmojiImportText,
     settingsContextLimit, setSettingsContextLimit,
     settingsHideSysLogs, setSettingsHideSysLogs,
+    settingsCallInitiative, setSettingsCallInitiative,
     preserveContext, setPreserveContext,
     editContent, setEditContent,
     selectedMessage, selectedEmoji, activeCharacter, allHistoryMessages = [],
@@ -107,6 +110,12 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                         <input type="range" min="500" max="10000" step="500" value={chatWaitTime} onChange={e => onSetChatWaitTime(parseInt(e.target.value))} className="w-full h-2 bg-slate-200 rounded-full appearance-none accent-primary" />
                         <div className="flex justify-between text-[10px] text-slate-400 mt-1"><span>0.5s (即时)</span><span>10s (深度思考)</span></div>
                         <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">连续发送消息包的时间窗。检测到“视频/图片”时会自动额外增加 1.5s。</p>
+                    </div>
+                    <div>
+                        <label className="text-xs font-bold text-slate-400 uppercase mb-2 block">Agent 主动来电倾向 ({Math.round(settingsCallInitiative * 100)}%)</label>
+                        <input type="range" min="0" max="100" step="1" value={Math.round(settingsCallInitiative * 100)} onChange={e => setSettingsCallInitiative(parseInt(e.target.value) / 100)} className="w-full h-2 bg-slate-200 rounded-full appearance-none accent-primary" />
+                        <div className="flex justify-between text-[10px] text-slate-400 mt-1"><span>0% (极保守)</span><span>100% (很主动)</span></div>
+                        <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">仅影响对话内主动来电的触发倾向与冷却时长。</p>
                     </div>
                     {onSetReplySplitInterval && (
                         <div>

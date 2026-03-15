@@ -10,6 +10,7 @@ export interface AgentSoulData {
 export interface UserProfileData {
     name?: string;
     nickname?: string;
+    preferredNames?: string[];
     bio?: string;
     avatar?: string;
 }
@@ -56,7 +57,7 @@ const extractSection = (content: string, heading: string): string => {
 const extractNotesBlock = (content: string): string => {
     if (!content) return '';
     const lines = content.split(/\r?\n/);
-    const fieldRe = /^\s*-\s*(Name|Preferred name|Avatar|Notes)\s*:/i;
+    const fieldRe = /^\s*-\s*(Name|Nickname|Preferred name|Avatar|Notes)\s*:/i;
     for (let i = 0; i < lines.length; i++) {
         const match = lines[i].match(/^\s*-\s*Notes\s*:\s*(.*)$/i) || lines[i].match(/^\s*Notes\s*:\s*(.*)$/i);
         if (!match) continue;
@@ -163,16 +164,30 @@ export const buildAgentSystemPromptFromSoul = (data: AgentSoulData): string => {
 export const parseUserProfileMarkdown = (content: string): UserProfileData | null => {
     if (!content || typeof content !== 'string') return null;
     const name = matchLine(content, 'Name');
-    const nickname = normalizeValue(matchLine(content, 'Nickname') || matchLine(content, 'Preferred name'));
+    const hasNicknameField = /^\s*(?:-\s*)?Nickname\s*:/im.test(content);
+    const hasPreferredNameField = /^\s*(?:-\s*)?Preferred name\s*:/im.test(content);
+    const hasPreferredNamesField = /^\s*(?:-\s*)?Preferred names\s*:/im.test(content);
+    
+    let nickname = normalizeValue(matchLine(content, 'Nickname'));
+    let preferredNames: string[] = [];
+    
+    const prefRaw = matchLine(content, 'Preferred name') || matchLine(content, 'Preferred names');
+    if (prefRaw) {
+        preferredNames = prefRaw.split(/[,，\n]/).map(n => n.trim()).filter(Boolean);
+    }
+    
+    if (!hasNicknameField && (hasPreferredNameField || hasPreferredNamesField)) nickname = '';
     const avatar = normalizeValue(matchLine(content, 'Avatar'));
     const persona = extractSection(content, 'Persona') || extractSection(content, 'Notes');
     const notesLine = matchLine(content, 'Notes');
     const notesBlock = extractNotesBlock(content);
     const bio = persona || notesBlock || notesLine;
-    if (!name && !nickname && !avatar && !bio) return null;
+    
+    if (!name && !nickname && preferredNames.length === 0 && !avatar && !bio) return null;
     return {
         name: name || undefined,
-        nickname: nickname || undefined,
+        nickname: hasNicknameField ? (nickname || '') : undefined,
+        preferredNames: (hasPreferredNameField || hasPreferredNamesField) ? preferredNames : undefined,
         avatar: avatar || undefined,
         bio: bio || undefined
     };
@@ -181,6 +196,7 @@ export const parseUserProfileMarkdown = (content: string): UserProfileData | nul
 export const buildUserProfileMarkdown = (data: UserProfileData): string => {
     const name = (data.name || 'User').trim();
     const nickname = (data.nickname || '').trim();
+    const preferredNames = (data.preferredNames || []).join(', ');
     const avatar = (data.avatar || '').trim();
     const bio = (data.bio || '').trim();
     return [
@@ -188,6 +204,7 @@ export const buildUserProfileMarkdown = (data: UserProfileData): string => {
         '',
         `Name: ${name}`,
         `Nickname: ${nickname || 'N/A'}`,
+        `Preferred names: ${preferredNames || 'N/A'}`,
         `Avatar: ${avatar || 'default'}`,
         '',
         '## Persona',
@@ -206,6 +223,7 @@ export const buildUserProfileMarkdown = (data: UserProfileData): string => {
 export const buildUserMarkdownFromProfile = (data: UserProfileData): string => {
     const name = (data.name || 'User').trim();
     const nickname = (data.nickname || '').trim();
+    const preferredNames = (data.preferredNames || []).join(', ');
     const avatarRaw = (data.avatar || '').trim();
     const avatar = avatarRaw.startsWith('data:') || avatarRaw.startsWith('http') || avatarRaw.startsWith('blob:') ? '' : avatarRaw;
     const bio = (data.bio || '').trim();
@@ -215,7 +233,8 @@ export const buildUserMarkdownFromProfile = (data: UserProfileData): string => {
         '# USER.md',
         '',
         `- Name: ${name}`,
-        `- Preferred name: ${nickname || name}`,
+        `- Nickname: ${nickname || 'N/A'}`,
+        `- Preferred names: ${preferredNames || 'N/A'}`,
         `- Avatar: ${avatar || 'default'}`,
         ...(hasBioLines
             ? ['- Notes:', ...bioLines.map(line => `  ${line}`)]

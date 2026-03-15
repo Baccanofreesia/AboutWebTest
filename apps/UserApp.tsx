@@ -29,6 +29,7 @@ const UserApp: React.FC = () => {
     const [userNicknameInput, setUserNicknameInput] = useState(userProfile.nickname || '');
     const [userNameInput, setUserNameInput] = useState(userProfile.name || '');
     const [userBioInput, setUserBioInput] = useState(userProfile.bio || '');
+    const [preferredNamesInput, setPreferredNamesInput] = useState<string[]>(userProfile.preferredNames || []);
     const [agentNicknameInput, setAgentNicknameInput] = useState(agent?.nickname || '');
     const [showVoiceDesigner, setShowVoiceDesigner] = useState(false);
     const [showAvatarPicker, setShowAvatarPicker] = useState(false);
@@ -68,7 +69,8 @@ const UserApp: React.FC = () => {
     useEffect(() => {
         setUserNameInput(userProfile.name || '');
         setUserBioInput(userProfile.bio || '');
-    }, [userProfile.name, userProfile.bio]);
+        setPreferredNamesInput(userProfile.preferredNames || []);
+    }, [userProfile.name, userProfile.bio, userProfile.preferredNames]);
 
     useEffect(() => {
         setAgentNicknameInput(agent?.nickname || '');
@@ -93,24 +95,26 @@ const UserApp: React.FC = () => {
         return (
             norm(userNameInput) !== norm(userProfile.name) ||
             norm(userNicknameInput) !== norm(userProfile.nickname) ||
-            norm(userBioInput) !== norm(userProfile.bio)
+            norm(userBioInput) !== norm(userProfile.bio) ||
+            JSON.stringify(preferredNamesInput) !== JSON.stringify(userProfile.preferredNames || [])
         );
-    }, [userBioInput, userNameInput, userNicknameInput, userProfile.bio, userProfile.name, userProfile.nickname]);
+    }, [userBioInput, userNameInput, userNicknameInput, userProfile.bio, userProfile.name, userProfile.nickname, preferredNamesInput, userProfile.preferredNames]);
 
     // Local USER.md polling removed - handled by OSContext
 
-    const writeUserProfileFile = useCallback(async (updates: Partial<{ name: string; nickname: string; avatar: string; bio: string }>) => {
+    const writeUserProfileFile = useCallback(async (updates: Partial<{ name: string; nickname: string; preferredNames: string[]; avatar: string; bio: string }>) => {
         if (!apiConfig.nativeWorkspacePath) return false;
         const content = buildUserMarkdownFromProfile({
             name: updates.name ?? userProfile.name ?? 'User',
             nickname: updates.nickname ?? userProfile.nickname,
+            preferredNames: updates.preferredNames ?? userProfile.preferredNames ?? [],
             avatar: updates.avatar ?? userProfile.avatar,
             bio: updates.bio ?? userProfile.bio
         });
         await fsBridge.writeFile(apiConfig.nativeWorkspacePath, 'USER.md', content, allowGlobal);
         setUserProfileFileExists(true);
         return true;
-    }, [allowGlobal, apiConfig.nativeWorkspacePath, userProfile.avatar, userProfile.bio, userProfile.name, userProfile.nickname]);
+    }, [allowGlobal, apiConfig.nativeWorkspacePath, userProfile.avatar, userProfile.bio, userProfile.name, userProfile.nickname, userProfile.preferredNames]);
 
     const writeAgentSoulFile = useCallback(async (updates: Partial<AgentSoulData>) => {
         if (!apiConfig.nativeWorkspacePath || !agent) return false;
@@ -306,7 +310,8 @@ const UserApp: React.FC = () => {
     const commitUserProfileDetails = useCallback(async () => {
         const nextName = userNameInput.trim() || userProfile.name || 'User';
         const nextBio = userBioInput.trim();
-        await updateUserProfile({ name: nextName, bio: nextBio });
+        const nextPreferredNames = preferredNamesInput.map(n => n.trim()).filter(n => !!n);
+        await updateUserProfile({ name: nextName, bio: nextBio, preferredNames: nextPreferredNames });
         if (!apiConfig.nativeWorkspacePath) {
             addToast('未配置工作区路径，无法写入 USER.md', 'error');
             return;
@@ -315,6 +320,7 @@ const UserApp: React.FC = () => {
             await writeUserProfileFile({
                 name: nextName,
                 nickname: userNicknameInput.trim(),
+                preferredNames: nextPreferredNames,
                 avatar: userProfile.avatar,
                 bio: nextBio
             });
@@ -323,7 +329,7 @@ const UserApp: React.FC = () => {
         } catch (e: any) {
             addToast(e.message || '写入 USER.md 失败', 'error');
         }
-    }, [addToast, apiConfig.nativeWorkspacePath, updateUserProfile, userBioInput, userNameInput, userNicknameInput, userProfile.avatar, userProfile.name, writeUserProfileFile]);
+    }, [addToast, apiConfig.nativeWorkspacePath, updateUserProfile, userBioInput, userNameInput, userNicknameInput, userProfile.avatar, userProfile.name, preferredNamesInput, writeUserProfileFile]);
 
     const commitUserNickname = useCallback(async () => {
         const next = userNicknameInput.trim();
@@ -444,6 +450,39 @@ const UserApp: React.FC = () => {
                                         placeholder="请填写您的姓名"
                                         className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-700 focus:border-primary outline-none"
                                     />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">称呼偏好 (多个)</label>
+                                    <div className="flex flex-wrap gap-2">
+                                        {preferredNamesInput.map((name, idx) => (
+                                            <div key={idx} className="flex items-center gap-1 bg-primary/10 text-primary px-2 py-1 rounded-lg text-xs font-medium">
+                                                <span>{name}</span>
+                                                <button 
+                                                    onClick={() => setPreferredNamesInput(prev => prev.filter((_, i) => i !== idx))}
+                                                    className="p-0.5 hover:bg-primary/20 rounded-full transition-colors"
+                                                >
+                                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                                                    </svg>
+                                                </button>
+                                            </div>
+                                        ))}
+                                        <button 
+                                            onClick={() => {
+                                                const n = prompt('输入新的称呼偏好');
+                                                if (n && n.trim()) {
+                                                    setPreferredNamesInput(prev => [...prev, n.trim()]);
+                                                }
+                                            }}
+                                            className="px-2 py-1 rounded-lg border border-dashed border-slate-300 text-slate-400 text-xs hover:border-primary hover:text-primary transition-all flex items-center gap-1"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                                            </svg>
+                                            添加
+                                        </button>
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 leading-tight">Agent 会随机从这些称呼中选择一个来称呼你。</p>
                                 </div>
                                 <div>
                                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 block">人设/备注</label>

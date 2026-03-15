@@ -68,12 +68,14 @@ const WifiIcon: React.FC<{ bars: number }> = ({ bars }) => (
 );
 
 const StatusBar: React.FC = () => {
-  const { virtualTime } = useOS();
+  const { virtualTime, callState, showCallOverlay, setShowCallOverlay, openApp } = useOS();
   const battery = useBattery();
   const wifiBars = useNetwork();
 
   const format = (n: number) => n.toString().padStart(2, '0');
   const pct = Math.round(battery.level * 100);
+
+  const hasActiveCall = callState !== 'idle';
 
   return (
     <div className="h-10 w-full flex justify-between items-center px-6 text-xs font-semibold z-50 absolute top-0 left-0 bg-transparent mix-blend-difference text-white pointer-events-none transition-colors duration-500">
@@ -81,7 +83,16 @@ const StatusBar: React.FC = () => {
         <span>{format(virtualTime.hours)}:{format(virtualTime.minutes)}</span>
       </div>
       <div className="w-1/3 flex justify-center">
-        {/* Notch Area spacer */}
+        {hasActiveCall && !showCallOverlay ? (
+          <button
+            onClick={() => { openApp('chat'); setShowCallOverlay(true); }}
+            className="pointer-events-auto px-3 py-1 rounded-full bg-emerald-500/20 text-[10px] font-bold text-emerald-200 border border-emerald-400/30"
+          >
+            通话中 · 点击返回
+          </button>
+        ) : (
+          <div />
+        )}
       </div>
       <div className="w-1/3 flex justify-end gap-2 items-center">
         <WifiIcon bars={wifiBars} />

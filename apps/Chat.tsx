@@ -1,10 +1,7 @@
-
-
-
 import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB, ScheduledMessage } from '../utils/db';
-import { Message, MessageType, ChatTheme, BubbleStyle, MemoryFragment, AppID, CharacterProfile, UserProfile } from '../types';
+import { Message, MessageType, ChatTheme, BubbleStyle, MemoryFragment, AppID, CharacterProfile, UserProfile, CallState, CallDirection, CallBubble } from '../types';
 import Modal from '../components/os/Modal';
 import { processImage } from '../utils/file';
 import { LocalNotifications } from '@capacitor/local-notifications';
@@ -14,18 +11,19 @@ import { fsBridge } from '../utils/fsBridge';
 import { buildRenamedFileName, buildTempRelativePath, classifyChatFile, extractTextPreview, fileToBase64, isForbiddenMediaFile } from '../utils/chatFiles';
 import ChatModals from '../components/chat/ChatModals';
 import ChatMessageItem from '../components/chat/MessageItem';
+import CallOverlay from '../components/chat/CallOverlay';
+import { useCallManager } from '../hooks/useCallManager';
 import { EventBus } from '../utils/eventBus';
 import VoiceRecorder, { VoiceAction } from '../components/chat/VoiceRecorder';
-import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import { useVoiceRecorder, VoiceRecordResult } from '../hooks/useVoiceRecorder';
 import VoiceToast, { useVoiceToast } from '../components/chat/VoiceToast';
-import { synthesizeSpeech } from '../utils/ttsService';
-import { getSTTService } from '../utils/sttService';
+import { cleanTextForTts, synthesizeSpeech } from '../utils/ttsService';
 import { StickerParser, StickerSet, StickerItem } from '../utils/stickerParser';
 import StickerPicker from '../components/chat/StickerPicker';
 import { voiceStopIntent, voiceStartIntent } from '../utils/voiceIntent';
 import { resolveApiEndpoint } from '../utils/apiResolver';
+import { transcribeWithColi } from '../utils/asrService';
 
-// Built-in presets map to the new data structure for consistency
 const PRESET_THEMES: Record<string, ChatTheme> = {
     default: {
         id: 'default', name: 'Indigo', type: 'preset',
@@ -134,7 +132,7 @@ const chatMimeFromName = (name: string) => {
 const chatFileToDataUrl = (file: File): Promise<string> => new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = () => resolve(String(r.result || ''));
-    r.onerror = () => reject(r.error || new Error('读取失败'));
+    r.onerror = () => reject(r.error || new Error('璇诲彇澶辫触'));
     r.readAsDataURL(file);
 });
 
@@ -212,7 +210,7 @@ const captureVideoFrames = async (videoDataUrl: string, frameCount: number = 3):
 };
 
 const Chat: React.FC = () => {
-    const { characters, activeCharacterId, setActiveCharacterId, updateCharacter, apiConfig, closeApp, openApp, customThemes, removeCustomTheme, addToast, userProfile, updateUserProfile, lastMsgTimestamp, activeApp, realtimeConfig } = useOS();
+    const { characters, activeCharacterId, setActiveCharacterId, updateCharacter, apiConfig, closeApp, openApp, customThemes, removeCustomTheme, addToast, userProfile, updateUserProfile, lastMsgTimestamp, activeApp, realtimeConfig, suspendCall, clearSuspendedCall } = useOS();
     const [messages, setMessages] = useState<Message[]>([]);
     const [visibleCount, setVisibleCount] = useState(30);
     const [input, setInput] = useState('');
@@ -229,6 +227,7 @@ const Chat: React.FC = () => {
     const [settingsContextLimit, setSettingsContextLimit] = useState(500);
     const [settingsHideSysLogs, setSettingsHideSysLogs] = useState(false);
     const [settingsReplySplitInterval, setSettingsReplySplitInterval] = useState(0);
+    const [settingsCallInitiative, setSettingsCallInitiative] = useState(0.5);
     const [preserveContext, setPreserveContext] = useState(true);
     const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
     const [selectedEmoji, setSelectedEmoji] = useState<{ name: string, url: string } | null>(null);
@@ -241,8 +240,8 @@ const Chat: React.FC = () => {
     const [translationEnabled, setTranslationEnabled] = useState(() => {
         try { return JSON.parse(localStorage.getItem(`chat_translate_enabled_${activeCharacterId}`) || 'false'); } catch { return false; }
     });
-    const [translateSourceLang, setTranslateSourceLang] = useState(() => localStorage.getItem('chat_translate_source_lang') || '日本語');
-    const [translateTargetLang, setTranslateTargetLang] = useState(() => localStorage.getItem('chat_translate_lang') || '中文');
+    const [translateSourceLang, setTranslateSourceLang] = useState(() => localStorage.getItem('chat_translate_source_lang') || 'Japanese');
+    const [translateTargetLang, setTranslateTargetLang] = useState(() => localStorage.getItem('chat_translate_lang') || 'Chinese');
     const [showingTargetIds, setShowingTargetIds] = useState<Set<number>>(new Set());
     const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [isSummarizing, setIsSummarizing] = useState(false);
@@ -254,7 +253,7 @@ const Chat: React.FC = () => {
     const [pickerVisibleCount, setPickerVisibleCount] = useState(45);
     const mediaDetailCacheRef = useRef<Map<string, { detail: string; ts: number; videoFrames?: string[] }>>(new Map());
 
-    // ── Voice Mode State & TTS ──
+    // 鈹€鈹€ Voice Mode State & TTS 鈹€鈹€
     const [voiceMode, setVoiceMode] = useState(false);
     const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
     const [sessionVoiceActive, setSessionVoiceActive] = useState(false);
@@ -267,16 +266,6 @@ const Chat: React.FC = () => {
     const sttTranscriptRef = useRef<string>('');
     const { toastMsg: voiceToastMsg, toastVisible: voiceToastVisible, showToast: showVoiceToast, dismissToast: dismissVoiceToast } = useVoiceToast();
 
-    useEffect(() => {
-        return () => {
-            if (voiceLockTimerRef.current) {
-                clearTimeout(voiceLockTimerRef.current);
-                voiceLockTimerRef.current = null;
-            }
-        };
-    }, []);
-
-    // ── Phase 2.5: Message Coalescing ──
     const [chatWaitTime, setChatWaitTime] = useState(3000); // ms
     const triggerDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -294,13 +283,16 @@ const Chat: React.FC = () => {
     const currentThemeId = char?.bubbleStyle || 'default';
     const activeTheme = useMemo(() => customThemes.find(t => t.id === currentThemeId) || PRESET_THEMES[currentThemeId] || PRESET_THEMES.default, [currentThemeId, customThemes]);
     const draftKey = `chat_draft_${activeCharacterId}`;
+
     const updateAgentDisplay = useCallback(async (updates: Partial<CharacterProfile>) => {
         if (!char) return;
         await updateCharacter(char.id, updates as any);
     }, [char, updateCharacter]);
+
     const updateUserProfileDisplay = useCallback(async (updates: Partial<UserProfile>) => {
         await updateUserProfile(updates);
     }, [updateUserProfile]);
+
     const { isTyping, recallStatus, lastTokenUsage, setLastTokenUsage, triggerAI } = useChatAI({
         char,
         userProfile,
@@ -321,7 +313,42 @@ const Chat: React.FC = () => {
         setVoiceEnergy,
     });
 
-    // Auto-TTS removed (moved to ChatParser for unified handling)
+    const callManager = useCallManager({ messages, setMessages, triggerAI, char });
+    const {
+        callState, callDirection, callBubbles, callElapsed,
+        callInputMode, setCallInputMode, callInput, setCallInput,
+        callMicMuted, callStartedAt, callBusy, callStatusLabel,
+        callScrollRef, callMicActive, callVolumeLevel,
+        toggleMute, startCall, acceptIncomingCall, hangup,
+        sendCallUserText
+    } = callManager;
+
+    const formatCallDuration = (s: number) => {
+        const m = Math.floor(s / 60);
+        const sec = s % 60;
+        return m.toString().padStart(2, '0') + ':' + sec.toString().padStart(2, '0');
+    };
+
+    const handleCallSendText = () => {
+        if (callInput.trim()) {
+            sendCallUserText(callInput.trim());
+            setCallInput('');
+        }
+    };
+
+    const { showCallOverlay } = useOS();
+
+    useEffect(() => {
+        return () => {
+            if (voiceLockTimerRef.current) {
+                clearTimeout(voiceLockTimerRef.current);
+                voiceLockTimerRef.current = null;
+            }
+        };
+    }, []);
+
+    // Unified scroll effect for chat (already handled elsewhere or usually in a main effect)
+
 
     // Reroll Logic Helpers
     const canReroll = !isTyping && messages.length > 0 && messages[messages.length - 1].role === 'assistant';
@@ -336,6 +363,7 @@ const Chat: React.FC = () => {
                 setSettingsContextLimit(char.contextLimit || 500);
                 setSettingsHideSysLogs(!!char.hideSystemLogs);
                 setSettingsReplySplitInterval(char.replySplitInterval || 0);
+                setSettingsCallInitiative(char.callInitiative ?? 0.5);
             }
             try { setTranslationEnabled(JSON.parse(localStorage.getItem(`chat_translate_enabled_${activeCharacterId}`) || 'false')); } catch { setTranslationEnabled(false); }
             setShowingTargetIds(new Set());
@@ -373,6 +401,7 @@ const Chat: React.FC = () => {
         if (val.trim()) localStorage.setItem(draftKey, val);
         else localStorage.removeItem(draftKey);
     };
+
 
     useLayoutEffect(() => {
         if (scrollRef.current) {
@@ -829,11 +858,11 @@ const Chat: React.FC = () => {
             }
             await DB.deleteMessages(toDelete.map(m => m.id));
             setMessages(messages.slice(-10));
-            addToast(`已清理 ${toDelete.length} 条历史，保留最近10条`, 'success');
+            addToast(`已清理 ${toDelete.length} 条历史，保留最近 10 条`, 'success');
         } else {
             await DB.clearMessages(char.id);
             setMessages([]);
-            addToast('已清空 (包含见面记录)', 'success');
+            addToast('宸叉竻绌?(鍖呭惈瑙侀潰璁板綍)', 'success');
         }
         setModalType('none');
     };
@@ -918,16 +947,17 @@ const Chat: React.FC = () => {
                 const rawLog = dayMsgs.map((m: Message) => {
                     const time = `[${formatTime(m.timestamp)}]`;
                     const sender = m.role === 'user' ? userDisplayName : charDisplayName;
+                    const sourcePrefix = '';
                     let body = '';
-                    if (m.type === 'image') body = '[Image]';
-                    else if (m.type === 'video') body = '[Video]';
+                    if (m.type === 'image') body = '[图片]';
+                    else if (m.type === 'video') body = '[视频]';
                     else if (m.type === 'voice') {
                         const emo = m.metadata?.emotion ? ` (${m.metadata.emotion})` : '';
                         body = `[语音消息]: ${m.metadata?.transcription || '(无内容)'}${emo}`;
                     } else {
                         body = m.content;
                     }
-                    return `${time} ${sender}: ${body}`;
+                    return `${time} ${sender}: ${sourcePrefix}${body}`;
                 }).join('\n');
 
                 // Enhanced Prompt for concise memory
@@ -945,12 +975,12 @@ ${rawLog.substring(0, 8000)}`;
 
                 const resolved = resolveApiEndpoint(apiConfig);
                 let sumBody: any = {
-                        model: apiConfig.model,
-                        messages: [{ role: "user", content: prompt }],
-                        temperature: 0.5,
-                        // FIX: Increased token limit for reasoning models
-                        max_tokens: 4000
-                    };
+                    model: apiConfig.model,
+                    messages: [{ role: "user", content: prompt }],
+                    temperature: 0.5,
+                    // FIX: Increased token limit for reasoning models
+                    max_tokens: 4000
+                };
                 if (resolved.transformBody) sumBody = resolved.transformBody(sumBody);
                 const response = await fetch(resolved.chatUrl, {
                     method: 'POST',
@@ -1137,12 +1167,12 @@ ${rawLog.substring(0, 8000)}`;
         let finalWaitTime = chatWaitTime;
 
         // 2. Content-aware bonus: if user mentions seeing/media, wait longer (Agent "looking at media")
-        const mediaKeywords = /(视频|图|看|这张|那个)/i;
+        const mediaKeywords = /(瑙嗛|鍥緗鐪媩杩欏紶|閭ｄ釜)/i;
         if (mediaKeywords.test(text) || type === 'image' || type === 'video') {
             finalWaitTime += 1500;
         }
 
-        // 3. Add random jitter (±500ms) to feel more human
+        // 3. Add random jitter (卤500ms) to feel more human
         const jitter = Math.floor(Math.random() * 1001) - 500;
         finalWaitTime = Math.max(500, finalWaitTime + jitter);
 
@@ -1161,7 +1191,7 @@ ${rawLog.substring(0, 8000)}`;
         if (!galleryRootPath) return;
         const selectedPaths = Object.keys(pickerSelected).filter(k => pickerSelected[k]);
         if (selectedPaths.length === 0) {
-            addToast('请先选择媒体', 'info');
+            addToast('璇峰厛閫夋嫨濯掍綋', 'info');
             return;
         }
         let sent = 0;
@@ -1250,7 +1280,8 @@ ${rawLog.substring(0, 8000)}`;
         updateCharacter(char.id, {
             contextLimit: settingsContextLimit,
             hideSystemLogs: settingsHideSysLogs,
-            replySplitInterval: settingsReplySplitInterval
+            replySplitInterval: settingsReplySplitInterval,
+            callInitiative: settingsCallInitiative
         });
         setModalType('none');
         addToast('设置已保存', 'success');
@@ -1386,9 +1417,16 @@ ${rawLog.substring(0, 8000)}`;
 
     const displayMessages = messages
         .filter(m => m.metadata?.source !== 'date')
+        .filter(m => m.metadata?.source !== 'call')
+        .filter(m => m.metadata?.source !== 'call-followup-hint')
+        // 内部解释日志，必须对用户隐藏
+        .filter(m => m.metadata?.source !== 'call-internal-log')
+        .filter(m => !(typeof m.content === 'string' && m.content.includes('系统内部提示')))
         .filter(m => !char?.hideBeforeMessageId || m.id >= char.hideBeforeMessageId)
         .filter(m => !(char?.hideSystemLogs && m.role === 'system'))
         .slice(-visibleCount);
+
+    // Use callBusy and callStatusLabel from callManager directly (already destructured above)
 
     return (
         <div
@@ -1413,6 +1451,8 @@ ${rawLog.substring(0, 8000)}`;
                 setSettingsContextLimit={setSettingsContextLimit}
                 settingsHideSysLogs={settingsHideSysLogs}
                 setSettingsHideSysLogs={setSettingsHideSysLogs}
+                settingsCallInitiative={settingsCallInitiative}
+                setSettingsCallInitiative={setSettingsCallInitiative}
                 preserveContext={preserveContext}
                 setPreserveContext={setPreserveContext}
                 editContent={editContent}
@@ -1427,8 +1467,8 @@ ${rawLog.substring(0, 8000)}`;
                     const newChar = { ...char, chatVoiceEnabled: val };
                     await DB.saveCharacter(newChar);
                     updateCharacter(char.id, newChar);
-                    if (val) addToast('已开启语音回复', 'success');
-                    else addToast('已关闭语音回复', 'info');
+                    if (val) addToast('已开启语音回答', 'success');
+                    else addToast('已关闭语音回答', 'info');
                 }}
                 chatVoiceLang={char.chatVoiceLang}
                 onSetChatVoiceLang={async (lang) => {
@@ -1498,7 +1538,7 @@ ${rawLog.substring(0, 8000)}`;
                     </div>
                 ) : (
                     <div>
-                        <div className="text-[11px] text-slate-400 mb-2">支持单选/多选，已选 {Object.values(pickerSelected).filter(Boolean).length} 个</div>
+                        <div className="text-[11px] text-slate-400 mb-2">支持单选/多选，已选 ${Object.values(pickerSelected).filter(Boolean).length} 个</div>
                         <div className="grid grid-cols-3 gap-2 max-h-[52vh] overflow-y-auto no-scrollbar pr-1">
                             {pickerVisiblePhotos.map(photo => {
                                 const checked = !!pickerSelected[photo.path];
@@ -1561,7 +1601,7 @@ ${rawLog.substring(0, 8000)}`;
                                 )}
                                 {lastTokenUsage && (
                                     <div className="text-[9px] px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded-md font-mono border border-slate-200">
-                                        ⚡ {lastTokenUsage}
+                                        鈿?{lastTokenUsage}
                                     </div>
                                 )}
                             </div>
@@ -1685,21 +1725,12 @@ ${rawLog.substring(0, 8000)}`;
                                         e.preventDefault();
                                         setShowVoiceRecorder(true);
                                         voiceResultRef.current = voiceRecorder.startRecording();
-                                        // Start STT simultaneously
-                                        const stt = getSTTService();
                                         sttTranscriptRef.current = '';
-                                        if (stt.isSupported) {
-                                            stt.start((result) => { sttTranscriptRef.current = result.text; });
-                                        }
                                     }}
                                     onMouseDown={async () => {
                                         setShowVoiceRecorder(true);
                                         voiceResultRef.current = voiceRecorder.startRecording();
-                                        const stt = getSTTService();
                                         sttTranscriptRef.current = '';
-                                        if (stt.isSupported) {
-                                            stt.start((result) => { sttTranscriptRef.current = result.text; });
-                                        }
                                     }}
                                 >
                                     按住 说话
@@ -1717,33 +1748,31 @@ ${rawLog.substring(0, 8000)}`;
                     </>
                 )}
 
-                {/* Voice Recorder Overlay — appears while finger held down */}
+                {/* Voice Recorder Overlay 鈥?appears while finger held down */}
                 {showVoiceRecorder && (
                     <VoiceRecorder
                         isRecording={voiceRecorder.isRecording}
                         duration={voiceRecorder.duration}
                         volumeLevel={voiceRecorder.volumeLevel}
                         onAction={async (action: VoiceAction) => {
-                            const stt = getSTTService();
                             if (action === 'too_short') {
                                 voiceRecorder.cancelRecording();
-                                stt.cancel();
                                 setShowVoiceRecorder(false);
                                 showVoiceToast('说话时间太短');
                                 return;
                             }
                             if (action === 'cancel') {
                                 voiceRecorder.cancelRecording();
-                                stt.cancel();
                                 setShowVoiceRecorder(false);
                                 return;
                             }
-                            // Stop STT and get final transcription
-                            const transcription = stt.stop() || sttTranscriptRef.current;
                             voiceRecorder.stopRecording();
                             const result = await voiceResultRef.current;
                             setShowVoiceRecorder(false);
                             if (!result) return;
+                            const asrResult = await transcribeWithColi(result.blob);
+                            const transcription = asrResult?.text || '';
+                            const emotion = asrResult?.emotion || '';
 
                             const saveVoiceToWorkspace = async (blob: Blob, fallbackUrl: string) => {
                                 if (!workspaceRootPath) return fallbackUrl;
@@ -1766,7 +1795,7 @@ ${rawLog.substring(0, 8000)}`;
 
                             if (action === 'send') {
                                 const finalUrl = await saveVoiceToWorkspace(result.blob, result.url);
-                                handleSendText(finalUrl, 'voice', { duration: result.duration, transcription });
+                                handleSendText(finalUrl, 'voice', { duration: result.duration, transcription, emotion });
                             } else if (action === 'text') {
                                 // Convert to text: send as text message 
                                 if (transcription) {
@@ -1781,8 +1810,41 @@ ${rawLog.substring(0, 8000)}`;
                     />
                 )}
 
+
                 {/* WeChat-style centered voice toast */}
                 <VoiceToast message={voiceToastMsg} visible={voiceToastVisible} onDismiss={dismissVoiceToast} />
+
+                <CallOverlay
+                    visible={showCallOverlay}
+                    callState={callState}
+                    callDirection={callDirection}
+                    callStatusLabel={callStatusLabel}
+                    callStartedAt={callStartedAt}
+                    callElapsed={callElapsed}
+                    charDisplayName={charDisplayName}
+                    charDisplayAvatar={charDisplayAvatar}
+                    callBubbles={callBubbles}
+                    callInputMode={callInputMode}
+                    callInput={callInput}
+                    callBusy={callBusy}
+                    callMicMuted={callMicMuted}
+                    callMicActive={callMicActive}
+                    callVolumeLevel={callVolumeLevel}
+                    formatDuration={formatCallDuration}
+                    scrollRef={callScrollRef}
+                    onChangeInput={setCallInput}
+                    onSendText={handleCallSendText}
+                    onToggleInputMode={() => {
+                        const next = callInputMode === 'voice' ? 'text' : 'voice';
+                        setCallInputMode(next);
+                    }}
+                    onToggleMute={toggleMute}
+                    onMinimize={closeApp}
+                    onCancelOutgoing={hangup}
+                    onAcceptIncoming={acceptIncomingCall}
+                    onDeclineIncoming={hangup}
+                    onHangup={hangup}
+                />
 
                 {/* ... Panel Content (Kept same) ... */}
                 {showPanel !== 'none' && (
@@ -1790,6 +1852,18 @@ ${rawLog.substring(0, 8000)}`;
                         {showPanel === 'actions' && (
                             <div className="p-6 grid grid-cols-4 gap-8">
                                 <button onClick={() => setModalType('transfer')} className="flex flex-col items-center gap-2 text-slate-600 active:scale-95 transition-transform"><div className="w-14 h-14 bg-orange-50 rounded-2xl flex items-center justify-center shadow-sm text-orange-400 border border-orange-100"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6"><path d="M12 7.5a2.25 2.25 0 1 0 0 4.5 2.25 2.25 0 0 0 0-4.5Z" /><path fillRule="evenodd" d="M1.5 4.875C1.5 3.839 2.34 3 3.375 3h17.25c1.035 0 1.875.84 1.875 1.875v9.75c0 1.036-.84 1.875-1.875 1.875H3.375A1.875 1.875 0 0 1 1.5 14.625v-9.75ZM8.25 9.75a3.75 3.75 0 1 1 7.5 0 3.75 3.75 0 0 1-7.5 0ZM18.75 9a.75.75 0 0 0-.75.75v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V9.75a.75.75 0 0 0-.75-.75h-.008ZM4.5 9.75A.75.75 0 0 1 5.25 9h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75-.75H5.25a.75.75 0 0 1-.75-.75V9.75Z" clipRule="evenodd" /><path d="M2.25 18a.75.75 0 0 0 0 1.5c5.4 0 10.63.722 15.6 2.075 1.19.324 2.4-.558 2.4-1.82V18.75a.75.75 0 0 0-.75-.75H2.25Z" /></svg></div><span className="text-xs font-bold">转账</span></button>
+                                <button
+                                    onClick={() => { if (!showCallOverlay) startCall(); }}
+                                    disabled={showCallOverlay}
+                                    className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${showCallOverlay ? 'text-slate-300 opacity-60' : 'text-slate-600'}`}
+                                >
+                                    <div className="w-14 h-14 bg-emerald-50 rounded-2xl flex items-center justify-center shadow-sm text-emerald-500 border border-emerald-100">
+                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">
+                                            <path d="M6.62 10.79a15.053 15.053 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.01-.24c1.12.37 2.33.57 3.58.57a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.85 21 3 13.15 3 3a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.46.57 3.58a1 1 0 0 1-.24 1.01l-2.21 2.2Z" />
+                                        </svg>
+                                    </div>
+                                    <span className="text-xs font-bold">电话</span>
+                                </button>
                                 <button onClick={() => handleSendText('[戳一戳]', 'interaction')} className="flex flex-col items-center gap-2 text-slate-600 active:scale-95 transition-transform"><div className="w-14 h-14 bg-sky-50 rounded-2xl flex items-center justify-center shadow-sm text-2xl border border-sky-100">👉</div><span className="text-xs font-bold">戳一戳</span></button>
                                 <button onClick={handleFullArchive} className="flex flex-col items-center gap-2 text-slate-600 active:scale-95 transition-transform"><div className="w-14 h-14 bg-indigo-50 rounded-2xl flex items-center justify-center shadow-sm text-indigo-400 border border-indigo-100"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" /></svg></div><span className="text-xs font-bold">{isSummarizing ? '归档中...' : '记忆归档'}</span></button>
                                 <button onClick={() => setModalType('chat-settings')} className="flex flex-col items-center gap-2 text-slate-600 active:scale-95 transition-transform"><div className="w-14 h-14 bg-slate-50 rounded-2xl flex items-center justify-center shadow-sm text-slate-500 border border-slate-100"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 0 1 1.37.49l1.296 2.247a1.125 1.125 0 0 1-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 0 1 0 2.555c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 0 1-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 0 1-.22.128c-.331.183-.581.495-.644.869l-.212 1.281c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 0 1-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 0 1-1.369-.49l-1.297-2.247a1.125 1.125 0 0 1 .26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 0 1 0-2.555c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 0 1-.26-1.43l1.297-2.247a1.125 1.125 0 0 1 1.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281Z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg></div><span className="text-xs font-bold">设置</span></button>
@@ -1860,7 +1934,7 @@ ${rawLog.substring(0, 8000)}`;
                                 <div>
                                     <h3 className="text-xs font-bold text-slate-400 px-1 tracking-wider uppercase mb-3">我的形象</h3>
                                     <div className="flex flex-wrap gap-3 px-1">
-                                        {characters.map(c => (
+                                        {characters.map((c: CharacterProfile) => (
                                             <button key={c.id} onClick={() => { setActiveCharacterId(c.id); setShowPanel('none'); }} className={`px-4 py-2 rounded-xl text-xs font-bold border flex items-center gap-2 transition-all ${activeCharacterId === c.id ? 'bg-slate-100 text-primary border-primary/20' : 'bg-white border-slate-200 text-slate-500'}`}>
                                                 {(c.displayAvatar || (c.avatar && (c.avatar.startsWith('data:') || c.avatar.startsWith('http') || c.avatar.startsWith('blob:')))) ? (
                                                     <img

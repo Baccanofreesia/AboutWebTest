@@ -35,11 +35,15 @@ export const ContextBuilder = {
         context += `### 互动对象 (User)\n`;
         context += `- 名字: ${user.name}\n`;
         context += `- 聊天显示昵称: ${user.nickname || user.name}\n`;
+        if (Array.isArray(user.preferredNames) && user.preferredNames.length > 0) {
+            context += `- 称呼偏好 (Preferred Names): ${user.preferredNames.join(', ')}\n`;
+        }
         context += `- 设定/备注: ${user.bio || '无'}\n\n`;
 
         context += `### 身份与称呼原则 (Critical)\n`;
         context += `- 真实身份名字与聊天显示昵称是两层信息，不可混淆。\n`;
-        context += `- 聊天展示优先使用昵称：用户=(${user.nickname || user.name})，你=(${char.nickname || char.name})。\n`;
+        context += `- 聊天显示昵称仅用于UI展示，不代表对话中必须一直用该称呼。\n`;
+        context += `- 对话称呼需结合关系与语境自然选择，可用真名、昵称或爱称。\n`;
         context += `- 系统记录、严肃说明、关系日志中保留真实名字用于稳定识别。\n\n`;
 
         // ─── L4: Impression (Private Psychological Profile) ───

@@ -1,6 +1,5 @@
-
-import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
-import { APIConfig, AppID, OSTheme, AgentProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset } from '../types';
+import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
+import { APIConfig, AppID, OSTheme, AgentProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, CallState, CallDirection, CallActions, CallBubble, CallInputMode } from '../types';
 import { DB } from '../utils/db';
 import { fsBridge } from '../utils/fsBridge';
 import { RealtimeConfig, defaultRealtimeConfig } from '../utils/realtimeContext';
@@ -27,11 +26,11 @@ interface OSContextType {
 
     // Single Agent (Nova)
     agent: AgentProfile | null;
-    updateAgent: (updates: Partial<AgentProfile>) => void;
+    updateAgent: (updates: Partial<AgentProfile>) => Promise<void>;
 
     // User Profile
     userProfile: UserProfile;
-    updateUserProfile: (updates: Partial<UserProfile>) => void;
+    updateUserProfile: (updates: Partial<UserProfile>) => Promise<void>;
 
     availableModels: string[];
     setAvailableModels: (models: string[]) => void;
@@ -55,6 +54,38 @@ interface OSContextType {
     // Global Message Signal
     lastMsgTimestamp: number;
 
+    // Call Suspend
+    suspendedCall: { charId: string; charName: string; charAvatar?: string; startedAt: number } | null;
+    suspendCall: (info: { charId: string; charName: string; charAvatar?: string; startedAt: number }) => void;
+    resumeCall: () => void;
+    clearSuspendedCall: () => void;
+
+    // --- Global Call State ---
+    callState: CallState;
+    setCallState: (state: CallState) => void;
+    callDirection: CallDirection | null;
+    setCallDirection: (direction: CallDirection | null) => void;
+    showCallOverlay: boolean;
+    setShowCallOverlay: (show: boolean) => void;
+    callBubbles: CallBubble[];
+    setCallBubbles: (bubbles: CallBubble[]) => void;
+    callElapsed: number;
+    setCallElapsed: (val: number) => void;
+    callInput: string;
+    setCallInput: (val: string) => void;
+    callInputMode: CallInputMode;
+    setCallInputMode: (val: CallInputMode) => void;
+    callMicMuted: boolean;
+    setCallMicMuted: (val: boolean) => void;
+    callMicActive: boolean;
+    setCallMicActive: (val: boolean) => void;
+    callVolumeLevel: number;
+    setCallVolumeLevel: (val: number) => void;
+    
+    // Cross-app call action registry
+    callActionsRef: React.MutableRefObject<CallActions | null>;
+    registerCallActions: (actions: CallActions) => void;
+    
     // Realtime Perception
     realtimeConfig: RealtimeConfig;
     updateRealtimeConfig: (updates: Partial<RealtimeConfig>) => void;
@@ -89,11 +120,28 @@ const defaultTheme: OSTheme = {
     contentColor: '#ffffff',
 };
 
-const defaultApiConfig: APIConfig = {
+const DEFAULT_CALL_PAUSE_THRESHOLD = 800;
+const DEFAULT_CALL_SEGMENT_DURATION = 12000;
+
+const clampNumber = (value: unknown, min: number, max: number, fallback: number) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.min(max, Math.max(min, num));
+};
+
+const normalizeApiConfig = (config: APIConfig): APIConfig => ({
+    ...config,
+    callPauseThreshold: clampNumber(config.callPauseThreshold, 200, 3000, DEFAULT_CALL_PAUSE_THRESHOLD),
+    callSegmentDuration: clampNumber(config.callSegmentDuration, 4000, 30000, DEFAULT_CALL_SEGMENT_DURATION),
+});
+
+const defaultApiConfig: APIConfig = normalizeApiConfig({
     baseUrl: '',
     apiKey: '',
     model: 'gpt-4o-mini',
-};
+    callPauseThreshold: DEFAULT_CALL_PAUSE_THRESHOLD,
+    callSegmentDuration: DEFAULT_CALL_SEGMENT_DURATION,
+});
 
 const generateAvatar = (seed: string) => {
     const colors = ['9aadd4', 'b5a6d1', '8fb8d0', 'a8c4d8', 'c4b6d6', 'adb8cc'];
@@ -105,6 +153,7 @@ const generateAvatar = (seed: string) => {
 const defaultUserProfile: UserProfile = {
     name: 'User',
     avatar: generateAvatar('User'),
+    preferredNames: [],
     bio: 'No description yet.'
 };
 
@@ -161,7 +210,24 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     const [toasts, setToasts] = useState<Toast[]>([]);
     const [lastMsgTimestamp, setLastMsgTimestamp] = useState<number>(0);
     const [realtimeConfig, setRealtimeConfig] = useState<RealtimeConfig>(defaultRealtimeConfig);
+    const [suspendedCall, setSuspendedCall] = useState<{ charId: string; charName: string; charAvatar?: string; startedAt: number } | null>(null);
     const schedulerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    // --- Global Call State ---
+    const [callState, setCallState] = useState<CallState>('idle');
+    const [callDirection, setCallDirection] = useState<CallDirection | null>(null);
+    const [showCallOverlay, setShowCallOverlay] = useState(false);
+    const [callBubbles, setCallBubbles] = useState<CallBubble[]>([]);
+    const [callElapsed, setCallElapsed] = useState(0);
+    const [callInput, setCallInput] = useState('');
+    const [callInputMode, setCallInputMode] = useState<CallInputMode>('voice');
+    const [callMicMuted, setCallMicMuted] = useState(true);
+    const [callMicActive, setCallMicActive] = useState(false);
+    const [callVolumeLevel, setCallVolumeLevel] = useState(0);
+    const callActionsRef = useRef<CallActions | null>(null);
+    const registerCallActions = useCallback((actions: CallActions) => {
+        callActionsRef.current = actions;
+    }, []);
 
     // --- Initialization ---
     useEffect(() => {
@@ -193,7 +259,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 } catch (e) { console.error('Theme load error', e); }
             }
 
-            if (savedApi) setApiConfig(JSON.parse(savedApi));
+            if (savedApi) {
+                try {
+                    const parsed = JSON.parse(savedApi);
+                    setApiConfig(normalizeApiConfig({ ...defaultApiConfig, ...parsed }));
+                } catch (e) {
+                    console.error('API config load error', e);
+                    setApiConfig(defaultApiConfig);
+                }
+            }
             if (savedModels) setAvailableModels(JSON.parse(savedModels));
             if (savedPresets) setApiPresets(JSON.parse(savedPresets));
             if (savedRealtime) {
@@ -327,7 +401,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                                 nextUserProfile = {
                                     ...nextUserProfile,
                                     name: parsedUser.name || nextUserProfile.name,
-                                    nickname: parsedUser.nickname || nextUserProfile.nickname,
+                                    nickname: parsedUser.nickname ?? nextUserProfile.nickname,
+                                    preferredNames: parsedUser.preferredNames ?? nextUserProfile.preferredNames,
                                     bio: parsedUser.bio || nextUserProfile.bio,
                                     avatar: avatarPath || nextUserProfile.avatar,
                                     displayAvatar
@@ -441,7 +516,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                             setUserProfile(prev => ({
                                 ...prev,
                                 name: parsedUser.name || prev.name,
-                                nickname: parsedUser.nickname || prev.nickname,
+                                nickname: parsedUser.nickname ?? prev.nickname,
+                                preferredNames: parsedUser.preferredNames ?? prev.preferredNames,
                                 bio: parsedUser.bio || prev.bio,
                                 avatar: parsedUser.avatar || prev.avatar,
                                 displayAvatar: displayAvatar
@@ -520,7 +596,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
     // --- API Config ---
     const updateApiConfig = (updates: Partial<APIConfig>) => {
-        const newConfig = { ...apiConfig, ...updates };
+        const newConfig = normalizeApiConfig({ ...apiConfig, ...updates });
         setApiConfig(newConfig);
         localStorage.setItem('os_api_config', JSON.stringify(newConfig));
     };
@@ -703,9 +779,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     };
 
     // --- Navigation ---
-    const openApp = (appId: AppID | string) => setActiveApp(appId);
+    const openApp = (appId: AppID | string) => {
+        if (appId === AppID.Chat && callState !== 'idle') {
+            setShowCallOverlay(true);
+        }
+        setActiveApp(appId);
+    };
     const closeApp = () => setActiveApp(AppID.Launcher);
     const unlock = () => setIsLocked(false);
+    const suspendCall = (info: { charId: string; charName: string; charAvatar?: string; startedAt: number }) => setSuspendedCall(info);
+    const resumeCall = () => setActiveApp(AppID.Chat);
+    const clearSuspendedCall = () => setSuspendedCall(null);
 
     // --- CSS Custom Properties ---
     useEffect(() => {
@@ -837,9 +921,21 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 toasts, addToast,
                 customIcons, setCustomIcon,
                 lastMsgTimestamp,
+                suspendedCall, suspendCall, resumeCall, clearSuspendedCall,
                 realtimeConfig, updateRealtimeConfig,
                 exportSystem, importSystem, resetSystem,
                 askAgent,
+                callState, setCallState,
+                callDirection, setCallDirection,
+                showCallOverlay, setShowCallOverlay,
+                callBubbles, setCallBubbles,
+                callElapsed, setCallElapsed,
+                callInput, setCallInput,
+                callInputMode, setCallInputMode,
+                callMicMuted, setCallMicMuted,
+                callMicActive, setCallMicActive,
+                callVolumeLevel, setCallVolumeLevel,
+                callActionsRef, registerCallActions,
                 // Legacy compatibility
                 characters, activeCharacterId, updateCharacter,
                 addCharacter, deleteCharacter, setActiveCharacterId,

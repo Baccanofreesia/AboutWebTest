@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Message, ChatTheme } from '../../types';
 import { fsBridge } from '../../utils/fsBridge';
+import { DB } from '../../utils/db';
 import { fileExt } from '../../utils/chatFiles';
 import VoiceBubble from './VoiceBubble';
 
@@ -151,6 +152,30 @@ const MessageItem = React.memo(({
     const [filePreviewLoading, setFilePreviewLoading] = useState(false);
     const [filePreviewText, setFilePreviewText] = useState('');
     const [filePreviewPdfDataUrl, setFilePreviewPdfDataUrl] = useState('');
+    const [callDetailOpen, setCallDetailOpen] = useState(false);
+    const [callDetailLoading, setCallDetailLoading] = useState(false);
+    const [callDetailItems, setCallDetailItems] = useState<Message[]>([]);
+    const callSessionId = m.metadata?.callSessionId;
+
+    useEffect(() => {
+        let cancelled = false;
+        const run = async () => {
+            if (!callDetailOpen || m.metadata?.source !== 'call-end-popup' || !callSessionId) return;
+            if (callDetailItems.length > 0) return;
+            setCallDetailLoading(true);
+            try {
+                const all = await DB.getMessagesByCharId(m.charId);
+                const list = all.filter(msg => msg.metadata?.source === 'call' && msg.metadata?.callSessionId === callSessionId);
+                if (!cancelled) setCallDetailItems(list);
+            } catch {
+                if (!cancelled) setCallDetailItems([]);
+            } finally {
+                if (!cancelled) setCallDetailLoading(false);
+            }
+        };
+        run();
+        return () => { cancelled = true; };
+    }, [callDetailOpen, callSessionId, callDetailItems.length, m.charId, m.metadata?.source]);
 
     const handleTouchStart = () => {
         if (selectionMode) return;
@@ -207,18 +232,108 @@ const MessageItem = React.memo(({
     );
 
     if (isSystem) {
+        const isCallSummary = m.metadata?.source === 'call-end-popup';
+        const isCallLog = m.metadata?.source === 'call-log';
         const displayText = m.content.replace(/^\[(System|系统|System Log|系统记录)\s*[:：]?\s*/i, '').replace(/\]$/, '').trim();
-        return (
-            <div className="flex justify-center my-6 px-10 animate-fade-in">
-                <div className="flex items-center gap-1.5 bg-slate-200/40 backdrop-blur-md text-slate-500 px-3 py-1 rounded-full shadow-sm border border-white/20 select-none">
-                    {displayText.includes('任务') ? '✨' : displayText.includes('纪念日') || displayText.includes('Event') ? '📅' : displayText.includes('转账') ? '💰' : '🔔'}
+
+        const renderSystemWrapper = (content: React.ReactNode) => (
+            <div
+                className={`flex items-center w-full ${selectionMode ? 'pl-14' : ''} animate-fade-in relative transition-[padding] duration-300`}
+                onClick={(e) => {
+                    if (selectionMode) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onSelectionToggle?.(m.id);
+                    }
+                }}
+            >
+                {selectionMode && (
+                    <div className="absolute left-4 top-1/2 -translate-y-1/2 w-[22px] h-[22px] rounded-full border-[1.5px] border-slate-300 bg-white shadow-sm flex items-center justify-center transition-all z-50">
+                        {isSelected && <div className="w-[12px] h-[12px] rounded-full bg-blue-500"></div>}
+                    </div>
+                )}
+                <div className="flex justify-center my-6 px-10 w-full" {...(!selectionMode ? interactionProps : {})}>
+                    {content}
+                </div>
+            </div>
+        );
+
+        if (isCallSummary) {
+            const durationSec = Math.max(1, Number(m.metadata?.durationSec || 0));
+            const turnCount = Math.max(1, Number(m.metadata?.turnCount || 1));
+            const durationText = `${String(Math.floor(durationSec / 60)).padStart(2, '0')}:${String(durationSec % 60).padStart(2, '0')}`;
+            const memoTitle = m.metadata?.characterName || charName;
+            const memoAvatar = m.metadata?.characterAvatar || charAvatar;
+            const callMemo = String(m.metadata?.keepsakeLine || `“今天这通电话，我会记很久。” —— ${memoTitle}`);
+
+            return renderSystemWrapper(
+                <div className="rounded-3xl bg-gradient-to-br from-slate-50 to-slate-100/80 border border-slate-200/50 p-4 shadow-sm w-full max-w-[380px]">
+                    <div className="flex items-center gap-3">
+                        <img src={memoAvatar} alt={memoTitle} className="h-9 w-9 rounded-full object-cover ring-1 ring-slate-200/80" loading="lazy" decoding="async" />
+                        <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium text-slate-600 truncate">和 {memoTitle} 通了电话</div>
+                            <div className="text-xs text-slate-400 mt-0.5">{durationText} · {turnCount} 轮对话</div>
+                        </div>
+                    </div>
+                    <div className="mt-3 rounded-2xl bg-white/70 border border-slate-100 px-3.5 py-2.5 text-[13px] italic leading-relaxed text-slate-500">
+                        {callMemo}
+                    </div>
+                    <div className="mt-3 flex items-center justify-between">
+                        <button
+                            className="text-[11px] text-slate-500 hover:text-slate-700 transition-colors"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setCallDetailOpen(prev => !prev);
+                            }}
+                        >
+                            {callDetailOpen ? '收起记录' : '查看记录'}
+                        </button>
+                        <span className="text-[10px] text-slate-400">通话记录</span>
+                    </div>
+                    {callDetailOpen && (
+                        <div className="mt-2 rounded-2xl bg-white/80 border border-slate-100 px-3 py-2.5 text-[12px] text-slate-500 space-y-1.5 max-h-36 overflow-y-auto">
+                            {callDetailLoading && <div className="text-slate-400">加载中...</div>}
+                            {!callDetailLoading && callDetailItems.length === 0 && (
+                                <div className="text-slate-400">暂无记录</div>
+                            )}
+                            {!callDetailLoading && callDetailItems.map(item => (
+                                <div key={item.id} className="leading-relaxed">
+                                    <span className="mr-1 text-slate-400">{item.role === 'user' ? '我' : memoTitle}:</span>
+                                    <span>{item.content}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        if (isCallLog) {
+            const variant = String(m.metadata?.variant || '').toLowerCase();
+            const icon = variant === 'declined' ? '📵' : variant === 'canceled' ? '❌' : variant === 'missed' ? '☎️' : '📞';
+            const toneClass = variant === 'declined'
+                ? 'bg-red-50 text-red-500 border-red-100'
+                : variant === 'connected'
+                    ? 'bg-emerald-50 text-emerald-600 border-emerald-100'
+                    : 'bg-slate-200/40 text-slate-500 border-white/20';
+            return renderSystemWrapper(
+                <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full shadow-sm border select-none ${toneClass}`}>
+                    <span>{icon}</span>
                     <span className="text-[10px] font-medium tracking-wide">{displayText}</span>
                 </div>
+            );
+        }
+
+        return renderSystemWrapper(
+            <div className="flex items-center gap-1.5 bg-slate-200/40 backdrop-blur-md text-slate-500 px-3 py-1 rounded-full shadow-sm border border-white/20 select-none">
+                {displayText.includes('任务') ? '✅' : displayText.includes('纪念日') || displayText.includes('Event') ? '📅' : displayText.includes('转账') ? '💵' : '🔔'}
+                <span className="text-[10px] font-medium tracking-wide">{displayText}</span>
             </div>
         );
     }
 
     if (m.type === 'interaction') {
+
         return (
             <div className={`flex flex-col items-center ${marginBottom} w-full animate-fade-in`}>
                 <div className="text-[10px] text-slate-400 mb-1 opacity-70">{formatTime(m.timestamp)}</div>
@@ -498,7 +613,14 @@ const MessageItem = React.memo(({
     const langAContent = hasBilingual ? stripJunk(rawContent.substring(0, bilingualIdx)) : stripJunk(rawContent);
     const langBContent = hasBilingual ? stripJunk(rawContent.substring(bilingualIdx + '%%BILINGUAL%%'.length)) : '';
     let displayContent = (isShowingTarget && langBContent) ? langBContent : langAContent;
-
+ 
+    // ✅ Handle call interruption: truncate text if interrupted mid-speech
+    const isInterrupted = m.metadata?.interrupted === true;
+    const spokenCharCount = m.metadata?.spokenCharCount;
+    if (isInterrupted && typeof spokenCharCount === 'number' && displayContent.length > spokenCharCount) {
+        displayContent = displayContent.slice(0, spokenCharCount) + '...';
+    }
+ 
     const hasVoiceTag = /<[语語]音>[\s\S]*?<\/[语語]音>/.test(rawContent);
     // Auto fallback textual UI indication for unrendered voice tags
     if (hasVoiceTag && !displayContent) {

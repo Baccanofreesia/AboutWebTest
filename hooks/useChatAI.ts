@@ -83,6 +83,7 @@ export const useChatAI = ({
         let base: UserProfileData = {
             name: userProfile.name || 'User',
             nickname: userProfile.nickname,
+            preferredNames: userProfile.preferredNames,
             avatar: userProfile.avatar,
             bio: userProfile.bio
         };
@@ -173,7 +174,7 @@ export const useChatAI = ({
             const stopIntentDetected = !!lastUserText && voiceStopIntent.test(String(lastUserText));
             const isVoiceCurrentlyActive = (voiceActiveOverride !== undefined ? voiceActiveOverride : sessionVoiceActive) && !stopIntentDetected;
             if (isVoiceCurrentlyActive && char.chatVoiceEnabled) {
-                baseSystemPrompt += `\n### 连续语音对话模式 (Continuous Voice Mode Active)\n   - **要求**: 你的回复**必须全程使用** \`<语音>文本</语音>\` 标签包裹所有自然语言文本内容。每一对标签会生成一个独立的语音气泡。即使有多个气泡，也请确保每个气泡的文本都在标签内。**非自然内容（URL/文件或动作标签/表情包指令）如需发送，请与语音分离输出，不要放在 <语音> 内**。
+                baseSystemPrompt += `\n### 连续语音对话模式 (Continuous Voice Mode Active)\n   - **要求**: 你的回复**必须全程使用** \`<语音>文本</语音>\` 标签包裹所有自然语言文本内容。每一对标签会生成一个独立的语音气泡。即使有多个气泡，也请确保每个气泡的文本都在标签内。**非自然内容（Emoji 表情、Sticker、URL、文件/动作标签、表情包指令）如需发送，请与语音分离输出，不要放在 <语音> 内**。
    - **退出提示**: 除非用户明确要求停止（如“发文字”），否则请坚持全程语音。\n`;
             } else {
                 // Defensive: If the last user message was voice but session mode is off, or user explicitly said stop, explicitly tell AI not to use voice tags.
@@ -238,21 +239,26 @@ export const useChatAI = ({
    - 【严禁】在输出中包含时间戳、名字前缀或"[角色名]:"。
    - **【严禁】模仿历史记录中的系统日志格式（如"[你 发送了...]"）。**
    - **【严禁】输出模拟思考/耗时标记**（如 \`[1s]\`、\`[2.5s]\`、\`（思考）\`）或任何舞台指示。
+   - **【严禁】输出思考过程、计划步骤或工具意图**（例如“让我先读取必要的文件…”“我先看看系统…”）。
    - **原生 Emoji 使用**: 鼓励在回复中自然地嵌入 Unicode Emoji（如 ✨, 💖, 😅, 🪴, ☕）作为语气的点缀或“微表情”。
    - **表情克制与多样性**: 保持表情使用克制（建议每 3-5 条消息中出现 1-2 个表情），严禁堆砌。根据对话的**细腻情感波动**（如尴尬、期待、治愈、忧郁）挑选最契合的表情，严禁机械重复。
    - **表情包使用**: 允许使用表情包，使用 \`[[SEND_EMOJI: 名称]]\` 或 \`[[SEND_EMOJI_FROM: 分类|关键词]]\`，并遵守表情包规则（见下方）。
-5. **昵称/实名规则**:
-   - 用户实名=${userProfile.name}，聊天昵称=${userDisplayName}
+5. **工具与文件系统 (Tools & Files)**:
+   - 仅当用户明确要求读取/修改文件时才使用文件系统工具。
+   - 若必须使用工具，**直接输出工具标签**，不要向用户解释“我正在读取/准备读取”。
+   - 不要重复提示“先读取文件”，也不要等待“读完”的确认。
+6. **昵称/实名规则**:
+    - 用户实名=${userProfile.name}，聊天昵称=${userDisplayName}${userProfile.preferredNames && userProfile.preferredNames.length > 0 ? `，称呼偏好=${userProfile.preferredNames.join('、')}` : ''}
    - 你的实名=${char.name}，聊天昵称=${agentDisplayName}
-   - 默认用聊天昵称，除非用户明确要求使用实名。
-6. **环境感知**:
+   - 聊天昵称仅用于展示，不代表“常用称呼”。对话称呼应结合关系与语境自然选择，可用真名、昵称或爱称，避免机械重复聊天昵称。
+7. **环境感知**:
    - 留意 [系统提示] 中的时间跨度。如果用户消失了很久，请根据你们的关系做出反应。
    - 如果用户发送了图片或视频，请对媒体内容进行评论。
-7. **相册优先原则**:
+8. **相册优先原则**:
    - 涉及头像更换/发图时，优先使用相册现有图片；参数可直接给“文件名”，系统会在相册中检索。
    - 仅当你明确需要新增素材且确认有价值时，才使用联网下载入库动作。
    - **相册 vs 工作区**: 相册=图片/视频库（只放媒体），使用 \`[[ACTION:SEND_GALLERY_IMAGE]]\` / \`[[ACTION:GALLERY_SCAN]]\` / \`[[ACTION:SAVE_IMAGE_FROM_URL]]\` 等；工作区=文件系统（文档/代码/压缩包/表格等），使用 \`[[ACTION:SEND_FILE]]\` 或 <fs_*> 操作。不要把相册路径当工作区路径。
-8. **可用动作**:
+9. **可用动作**:
    - 回戳用户: \`[[ACTION:POKE]]\`
    - 转账: \`[[ACTION:TRANSFER:100]]\`
    - 调取记忆: \`[[RECALL: YYYY-MM]]\`
@@ -274,7 +280,7 @@ export const useChatAI = ({
      [删除文件]: <fs_delete file="文件路径" />
      [执行文件]: <fs_execute file="文件路径" /> (支持执行 python/node 脚本，或直接运行 .bat / .exe，结果通过 STDOUT 呈现)
     (注意：由于安全限制，仅当用户开启全局权限后，你才能跳出Workspace访问/执行其他系统文件)\n       -# 【核心警告】：一旦使用了 <create_app> 或 <fs_write>，请务必只输出一次，绝不在正常的聊天回复中重复输出 App 代码！只有当用户明确要求【更新/重写/开发】App 时才能触发。\n`;
-            baseSystemPrompt += `\n### 表情包使用准则 (Sticker Rules)\n- 你现在是一个真实的人类角色，发送表情包本质是为了辅助表达情绪，请让它显得自然且克制。\n- **频率控制**: 严禁每轮都用。保持自然的节奏（建议每 3-5 条消息中出现 1 次表情包）。\n- **位置限制**: 表情包必须出现在**整轮回复的中间段落**。它应该作为情绪的过渡点或强调点。\n- **禁止收尾**: 【绝对禁止】在整轮回复的最后一句话后面添加表情包。表情包之后必须跟随至少一句话来完成表达。\n- **结构规范**: 开头回应文字 -> (可选) 1个表情包 -> 结尾补充/收尾文字。\n- 当用户发送表情包时，系统会在历史中标注名称/分类，请结合名称理解情绪与语境并给予回应。\n- 发送指令：\`[[SEND_EMOJI: 表情名称]]\` 或 \`[[SEND_EMOJI_FROM: 分类|关键词]]\`。\n`;
+            baseSystemPrompt += `\n### 表情包使用准则 (Sticker Rules)\n- 你现在是一个真实的人类角色，发送表情包本质是为了辅助表达情绪。**不再强调克制，根据语境自然使用即可**。\n- **位置限制**: 表情包必须出现在**整轮回复的中间段落**。它应该作为情绪的过渡点或强调点。\n- **禁止收尾**: 【绝对禁止】在整轮回复的最后一句话后面添加表情包。表情包之后必须跟随至少一句话来完成表达。\n- **结构规范**: 回应文字 -> (可选) 1个表情包 -> 结尾补充文字。如果你有多个段落，表情包可以放在段落之间，但整段回复必须以文字结束。\n- 当用户发送表情包时，系统会在历史中标注名称/分类，请结合名称理解情绪与语境并给予回应。\n- 发送指令：\`[[SEND_EMOJI: 名称]]\` 或 \`[[SEND_EMOJI_FROM: 分类|关键词]]\`。\n`;
 
             if (stickerIndex || stickerRelevantNames.length > 0) {
                 const relevantLine = stickerRelevantNames.length > 0 ? stickerRelevantNames.join('、') : '（无）';
@@ -283,7 +289,7 @@ export const useChatAI = ({
 
             const bilingualActive = translationConfig?.enabled && translationConfig.sourceLang && translationConfig.targetLang;
             if (bilingualActive) {
-                baseSystemPrompt += `\n8. **双语输出规则（必须严格遵守）**:
+                baseSystemPrompt += `\n10. **双语输出规则（必须严格遵守）**:
 你的每句话都必须使用以下 XML 标签格式输出双语内容：
 <翻译>
 <原文>${translationConfig.sourceLang}内容</原文>
@@ -297,7 +303,7 @@ export const useChatAI = ({
 - 表情包命令 [[SEND_EMOJI: ...]] / [[SEND_EMOJI_FROM: 分类|关键词]] 放在所有 <翻译> 标签外面`;
             }
             if (xhsEnabled) {
-                baseSystemPrompt += `\n9. **小红书模式**:
+                baseSystemPrompt += `\n11. **小红书模式**:
 - 可以结合聊天中的小红书卡片内容，给出分析、总结和建议。
 - 需要主动操作时，使用以下命令：
   - 搜索：\`[[XHS_SEARCH: 关键词]]\`
@@ -308,22 +314,25 @@ export const useChatAI = ({
             }
 
             if (char.chatVoiceEnabled) {
-                baseSystemPrompt += `\n10. **🎤 语音消息功能**:
+                baseSystemPrompt += `\n12. **🎤 语音消息功能**:
 用户开启了语音消息功能。
 **你可以发送语音消息！** 就像真人用微信一样，你可以选择打字或者发语音。
 用 \`<语音>要说的话</语音>\` 标签来发送语音。标签里的内容会被转成真正的语音条显示给用户。
-- \`<语音>\` 里只写会被朗读的自然语言，不要包含括号动作、舞台指示、URL、文件/动作标签、分享链接或表情包指令（如 \`[[SEND_EMOJI]]\`）。
+- \`<语音>\` 里只写会被朗读的自然语言，不要包含 Unicode Emoji 表情、Sticker、括号动作、舞台指示、URL、文件/动作标签、分享链接或表情包指令（如 \`[[SEND_EMOJI]]\`）。
 - 每条消息最多一个 \`<语音>\` 标签。
 - 不是每条消息都要发语音！像真人一样，有时候打字，有时候发语音，自然切换。比较适合发语音的场景：撒娇、吐槽、懒得打字、语气重的时候。
 - **【重要】语音和文字不要互为复读机！** 如果同时发文字和语音，文字和语音请表达【不同】的内容。你不会打完字又发一条语音把同句话再说一遍的。`;
             } else {
-                baseSystemPrompt += `\n10. **🎤 语音消息功能**:
+                baseSystemPrompt += `\n12. **🎤 语音消息功能**:
 [系统提示: 语音消息功能当前未开启。严禁使用 <语音>...</语音> 标签。所有回复必须是纯文字消息。]`;
             }
 
             const previousMsg = currentMsgs.length > 1 ? currentMsgs[currentMsgs.length - 2] : null;
             if (previousMsg && previousMsg.metadata?.source === 'date') {
                 baseSystemPrompt += `\n\n[System Note: You just finished a face-to-face meeting. You are now back on the phone. Switch back to texting style.]`;
+            }
+            if (previousMsg && (previousMsg.metadata?.source === 'call' || previousMsg.metadata?.source === 'call-end-popup' || previousMsg.metadata?.source === 'call-log')) {
+                baseSystemPrompt += `\n\n[系统提示: 你刚刚结束了一通电话，现在回到了文字聊天模式。请切换回 IM 短句风格——不要继续用电话口吻，不要输出通话标记。你可以根据通话记录自然作为衔接。]`;
             }
 
             const relationEvents = await DB.getRelationEvents(8).catch(() => []);
@@ -349,12 +358,14 @@ export const useChatAI = ({
             const buildHistory = (msgs: Message[], forceTextOnly: boolean = false) => msgs.map((m, index) => {
                 let content: any = m.content;
                 const timeStr = `[${formatDate(m.timestamp)}]`;
+                const sourceTag = m.metadata?.source === 'call' ? '[通话]' : '';
+                const sourcePrefix = sourceTag ? `${sourceTag} ` : '';
 
                 if (m.type === 'image') {
                     const fileName = (m.metadata?.fileName || '').toString().trim();
                     const galleryPath = (m.metadata?.galleryPath || '').toString().trim();
                     const imageDetail = (m.metadata?.imageDetail || '').toString().trim();
-                    let textPart = `${timeStr} [User sent an image${fileName ? ` | file=${fileName}` : ''}${galleryPath ? ` | path=${galleryPath}` : ''}${imageDetail ? ` | detail=${imageDetail}` : ''}]`;
+                    let textPart = `${timeStr} ${sourcePrefix}[User sent an image${fileName ? ` | file=${fileName}` : ''}${galleryPath ? ` | path=${galleryPath}` : ''}${imageDetail ? ` | detail=${imageDetail}` : ''}]`;
                     if (index === msgs.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
                     if (forceTextOnly) return { role: m.role, content: textPart };
                     return { role: m.role, content: [{ type: "text", text: textPart }, { type: "image_url", image_url: { url: m.content } }] };
@@ -366,7 +377,7 @@ export const useChatAI = ({
                     const maxAllowedFrames = apiConfig?.videoUnderstanding?.maxFrames || 12;
                     const frames = Array.isArray(m.metadata?.videoFrames) ? m.metadata.videoFrames.filter((x: any) => typeof x === 'string' && !!x).slice(0, maxAllowedFrames) : [];
                     const frame = (m.metadata?.videoFrame || '').toString().trim();
-                    let textPart = `${timeStr} [${m.role === 'user' ? 'User' : 'Assistant'} sent a video${fileName ? ` | file=${fileName}` : ''}${galleryPath ? ` | path=${galleryPath}` : ''}${videoDetail ? ` | detail=${videoDetail}` : ''}]`;
+                    let textPart = `${timeStr} ${sourcePrefix}[${m.role === 'user' ? 'User' : 'Assistant'} sent a video${fileName ? ` | file=${fileName}` : ''}${galleryPath ? ` | path=${galleryPath}` : ''}${videoDetail ? ` | detail=${videoDetail}` : ''}]`;
                     if (index === msgs.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
                     if (forceTextOnly) return { role: m.role, content: textPart };
                     if (frames.length > 0) return { role: m.role, content: [{ type: "text", text: textPart }, ...frames.map((f: string) => ({ type: "image_url", image_url: { url: f } }))] };
@@ -378,8 +389,8 @@ export const useChatAI = ({
                     const transcription = (m.metadata?.transcription || '').toString().trim();
                     const sender = m.role === 'user' ? '用户' : '你';
                     let textPart = transcription
-                        ? `${timeStr} [${sender}发送了语音消息 ${duration}秒]: ${transcription}`
-                        : `${timeStr} [${sender}发送了语音消息 ${duration}秒, 无法转写]`;
+                        ? `${timeStr} ${sourcePrefix}[${sender}发送了语音消息 ${duration}秒]: ${transcription}`
+                        : `${timeStr} ${sourcePrefix}[${sender}发送了语音消息 ${duration}秒, 无法转写]`;
                     if (index === msgs.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
                     return { role: m.role, content: textPart };
                 }
@@ -391,7 +402,7 @@ export const useChatAI = ({
                     const preview = (m.metadata?.previewText || '').toString().trim();
                     const previewPart = preview ? `\n[文件内容预览]\n${preview.slice(0, 1200)}` : '';
                     const sender = m.role === 'user' ? 'User' : 'Assistant';
-                    let textPart = `${timeStr} [${sender} sent a file${fileName ? ` | name=${fileName}` : ''}${fileType ? ` | type=${fileType}` : ''}${filePath ? ` | path=${filePath}` : ''}${fileSize > 0 ? ` | size=${fileSize}` : ''}]${previewPart}`;
+                    let textPart = `${timeStr} ${sourcePrefix}[${sender} sent a file${fileName ? ` | name=${fileName}` : ''}${fileType ? ` | type=${fileType}` : ''}${filePath ? ` | path=${filePath}` : ''}${fileSize > 0 ? ` | size=${fileSize}` : ''}]${previewPart}`;
                     if (index === msgs.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
                     return { role: m.role, content: textPart };
                 }
@@ -403,8 +414,8 @@ export const useChatAI = ({
                 }
                 if (index === msgs.length - 1 && timeGapHint && m.role === 'user') content = `${content}\n\n${timeGapHint}`;
 
-                if (m.type === 'interaction') content = `${timeStr} [系统: 用户戳了你一下]`;
-                else if (m.type === 'transfer') content = `${timeStr} [系统: 用户转账 ${m.metadata?.amount}]`;
+                if (m.type === 'interaction') content = `${timeStr} ${sourcePrefix}[系统: 用户戳了你一下]`;
+                else if (m.type === 'transfer') content = `${timeStr} ${sourcePrefix}[系统: 用户转账 ${m.metadata?.amount}]`;
                 else if (m.type === 'emoji') {
                     const metaName = (m.metadata?.stickerName || '').toString().trim();
                     const mapName = stickerUrlNameMap.get(m.content) || '';
@@ -412,8 +423,8 @@ export const useChatAI = ({
                     const stickerName = metaName || mapName || emojiName || 'Image/Sticker';
                     const category = stickerNameItemMap.get(stickerName)?.category || '';
                     const catPart = category ? ` | category=${category}` : '';
-                    content = `${timeStr} [${m.role === 'user' ? '用户' : '你'} 发送了表情包: ${stickerName}${catPart}]`;
-                } else content = `${timeStr} ${content}`;
+                    content = `${timeStr} ${sourcePrefix}[${m.role === 'user' ? '用户' : '你'} 发送了表情包: ${stickerName}${catPart}]`;
+                } else content = `${timeStr} ${sourcePrefix}${content}`;
                 return { role: m.role, content };
             });
 
@@ -481,7 +492,7 @@ export const useChatAI = ({
             aiContent = aiContent.replace(/\[\s*\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}.*?\]/g, '');
             aiContent = aiContent.replace(/^[\w\u4e00-\u9fa5]+:\s*/, '');
             aiContent = aiContent.replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
-
+            // aiContent = aiContent.replace(/\[(?:你|用户|User|Assistant)\s*发送了语音消息\s*\d+(?:\.\d+)?\s*秒[^\]]*\]\s*[:：]?[^\n]*/gi, '');
             // == 2. RECALL Logic ==
             const recallMatch = aiContent.match(/\[\[RECALL:\s*(\d{4})[-/年](\d{1,2})\]\]/);
             if (recallMatch) {
@@ -1021,8 +1032,12 @@ export const useChatAI = ({
 
             // Multi-Prompt concurrency handling (Serial Queue simulation)
             const latestMsgs = await DB.getMessagesByCharId(char.id);
-            const latestUserMsgs = latestMsgs.filter(m => m.role === 'user');
-            const currentUserMsgs = currentMsgs.filter(m => m.role === 'user');
+            const latestUserMsgs = latestMsgs.filter(
+                m => m.role === 'user' && m.metadata?.source !== 'call'
+            );
+            const currentUserMsgs = currentMsgs.filter(
+                m => m.role === 'user' && m.metadata?.source !== 'call'
+            );
 
             if (hasToolResult || latestUserMsgs.length > currentUserMsgs.length) {
                 setTimeout(() => triggerAI(latestMsgs), 500);
