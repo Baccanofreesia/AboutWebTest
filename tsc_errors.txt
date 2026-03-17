@@ -1,0 +1,5 @@
+apps/Chat.tsx(284,9): error TS2322: Type '(updates: Partial<UserProfile>) => void' is not assignable to type '(updates: Partial<UserProfile>) => Promise<void>'.
+  Type 'void' is not assignable to type 'Promise<void>'.
+apps/VoiceDesignerApp.tsx(2,84): error TS2307: Cannot find module '@phosphor-icons/react' or its corresponding type declarations.
+apps/VoiceDesignerApp.tsx(67,98): error TS2339: Property 'voiceName' does not exist on type '{ ttsProvider?: "minimax" | "fish_audio" | "edge_tts" | undefined; voiceId?: string | undefined; model?: string | undefined; pitch?: number | undefined; speed?: number | undefined; vol?: number | undefined; emotion?: string | undefined; timberWeights?: { ...; }[] | undefined; voiceModify?: { ...; } | undefined; }'.
+utils/chatParser.ts(262,21): error TS2322: Type '"agent_file_send"' is not assignable to type '"user_nickname_changed" | "agent_nickname_changed" | "user_avatar_changed" | "agent_avatar_changed" | "couple_avatar_set" | "agent_gallery_upload" | "agent_gallery_send"'.

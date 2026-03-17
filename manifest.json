@@ -1,0 +1,21 @@
+
+{
+  "short_name": "SullyOS",
+  "name": "SullyOS Simulator",
+  "icons": [
+    {
+      "src": "https://api.dicebear.com/9.x/notionists/svg?seed=Sully&backgroundColor=e6e6fa",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "https://api.dicebear.com/9.x/notionists/svg?seed=Sully&backgroundColor=e6e6fa",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ],
+  "start_url": "./index.html",
+  "display": "standalone",
+  "theme_color": "#0f1115",
+  "background_color": "#0f1115"
+}
