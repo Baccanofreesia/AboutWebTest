@@ -457,7 +457,7 @@ const UserApp: React.FC = () => {
                                         {preferredNamesInput.map((name, idx) => (
                                             <div key={idx} className="flex items-center gap-1 bg-primary/10 text-primary px-2 py-1 rounded-lg text-xs font-medium">
                                                 <span>{name}</span>
-                                                <button 
+                                                <button
                                                     onClick={() => setPreferredNamesInput(prev => prev.filter((_, i) => i !== idx))}
                                                     className="p-0.5 hover:bg-primary/20 rounded-full transition-colors"
                                                 >
@@ -467,7 +467,7 @@ const UserApp: React.FC = () => {
                                                 </button>
                                             </div>
                                         ))}
-                                        <button 
+                                        <button
                                             onClick={() => {
                                                 const n = prompt('输入新的称呼偏好');
                                                 if (n && n.trim()) {
@@ -561,8 +561,8 @@ const UserApp: React.FC = () => {
                                     <p className="text-xs text-violet-600 font-bold mb-1">Agent 真实身份</p>
                                     <p className="text-sm text-slate-600 font-medium">{agent.name}</p>
                                     <p className="text-[10px] text-slate-400 mt-2 italic leading-relaxed">
-                                        {(agent.description || '暂无详细设定').length > 120 
-                                            ? `${agent.description?.slice(0, 120)}...` 
+                                        {(agent.description || '暂无详细设定').length > 120
+                                            ? `${agent.description?.slice(0, 120)}...`
                                             : agent.description}
                                     </p>
                                 </div>

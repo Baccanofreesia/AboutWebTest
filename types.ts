@@ -18,6 +18,7 @@ export enum AppID {
     Schedule = 'schedule',
     Study = 'study',            // Study Room from SULLYTEST2
     FreeRoam = 'freeroam',      // XHS Free Roam from SULLYTEST2
+    XhsStock = 'xhs_stock',     // XHS image stock (optional)
     Music = 'music',            // Future: Listen together
     Browser = 'browser',        // Future: AI search/browse
 }
@@ -50,6 +51,57 @@ export interface Message {
     metadata?: any;
     replyTo?: MessageReplyRef;
     timestamp: number;
+}
+
+// --- XHS (小红书) ---
+
+export interface XhsStockImage {
+    id: string;
+    url: string;
+    localPath?: string;
+    tags: string[];
+    addedAt: number;
+    usedCount: number;
+    lastUsedAt?: number;
+}
+
+export type XhsActionType = 'post' | 'browse' | 'search' | 'comment' | 'save_topic' | 'idle';
+
+export interface XhsActivityRecord {
+    id: string;
+    characterId: string;
+    timestamp: number;
+    actionType: XhsActionType;
+    content: {
+        title?: string;
+        body?: string;
+        tags?: string[];
+        keyword?: string;
+        savedTopics?: { title: string; desc: string; noteId?: string }[];
+        notesViewed?: { noteId: string; title: string; desc: string; author: string; likes: number }[];
+        commentTarget?: { noteId: string; title: string };
+        commentText?: string;
+    };
+    thinking: string;
+    result: 'success' | 'failed' | 'skipped';
+    resultMessage?: string;
+}
+
+export interface XhsFreeRoamSession {
+    id: string;
+    characterId: string;
+    startedAt: number;
+    endedAt?: number;
+    activities: XhsActivityRecord[];
+    summary?: string;
+}
+
+export interface XhsMcpConfig {
+    enabled: boolean;
+    serverUrl: string;
+    loggedInUserId?: string;
+    loggedInNickname?: string;
+    userXsecToken?: string;
 }
 
 export interface AppConfig {
@@ -492,4 +544,6 @@ export interface FullBackupData {
     anniversaries?: Anniversary[];
     securityPolicy?: SecurityPolicy;
     cronJobs?: CronJob[];
+    xhsActivities?: XhsActivityRecord[];
+    xhsStockImages?: XhsStockImage[];
 }

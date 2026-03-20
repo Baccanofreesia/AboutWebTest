@@ -23,8 +23,7 @@ import StickerPicker from '../components/chat/StickerPicker';
 import { voiceStopIntent, voiceStartIntent } from '../utils/voiceIntent';
 import { resolveApiEndpoint } from '../utils/apiResolver';
 import { transcribeWithColi } from '../utils/asrService';
-import { useIntiface } from '../context/IntifaceContext';
-import IntifacePanel from '../components/chat/IntifacePanel';
+import { XhsMcpClient, normalizeNote } from '../utils/xhsMcpClient';
 
 const PRESET_THEMES: Record<string, ChatTheme> = {
     default: {
@@ -254,9 +253,8 @@ const Chat: React.FC = () => {
     const [pickerLoading, setPickerLoading] = useState(false);
     const [pickerVisibleCount, setPickerVisibleCount] = useState(45);
     const mediaDetailCacheRef = useRef<Map<string, { detail: string; ts: number; videoFrames?: string[] }>>(new Map());
-    const [showIntifacePanel, setShowIntifacePanel] = useState(false);
 
-    // 鈹€鈹€ Voice Mode State & TTS 鈹€鈹€
+    // ── Voice Mode State & TTS ──
     const [voiceMode, setVoiceMode] = useState(false);
     const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
     const [sessionVoiceActive, setSessionVoiceActive] = useState(false);
@@ -286,6 +284,7 @@ const Chat: React.FC = () => {
     const currentThemeId = char?.bubbleStyle || 'default';
     const activeTheme = useMemo(() => customThemes.find(t => t.id === currentThemeId) || PRESET_THEMES[currentThemeId] || PRESET_THEMES.default, [currentThemeId, customThemes]);
     const draftKey = `chat_draft_${activeCharacterId}`;
+    const effectiveXhsEnabled = char?.xhsEnabled !== undefined ? !!char.xhsEnabled : !!realtimeConfig?.xhsEnabled;
 
     const updateAgentDisplay = useCallback(async (updates: Partial<CharacterProfile>) => {
         if (!char) return;
@@ -311,41 +310,12 @@ const Chat: React.FC = () => {
         translationConfig: translationEnabled
             ? { enabled: true, sourceLang: translateSourceLang, targetLang: translateTargetLang }
             : undefined,
-        xhsEnabled: !!realtimeConfig?.xhsEnabled,
+        xhsEnabled: effectiveXhsEnabled,
         xhsMcpConfig: realtimeConfig?.xhsMcpConfig,
         sessionVoiceActive,
         setVoiceEnergy,
     });
 
-    // --- Intiface Integration ---
-    const { processMessage } = useIntiface();
-    const lastMsgIdRef = useRef<number | null>(null);
-    const lastMsgContentLengthRef = useRef<number>(0);
-
-    useEffect(() => {
-        if (messages.length === 0) return;
-        
-        const lastMsg = messages[messages.length - 1];
-        if (lastMsg.role !== 'assistant') return;
-
-        // Check if it's a new message
-        if (lastMsg.id !== lastMsgIdRef.current) {
-            lastMsgIdRef.current = lastMsg.id;
-            lastMsgContentLengthRef.current = 0;
-            
-            // Only process if it is likely a new generation (typing)
-            if (isTyping) {
-                 processMessage(lastMsg.content, true);
-                 lastMsgContentLengthRef.current = lastMsg.content.length;
-            }
-        } else {
-            // Same message, content update
-             if (isTyping && lastMsg.content.length > lastMsgContentLengthRef.current) {
-                 processMessage(lastMsg.content, false);
-                 lastMsgContentLengthRef.current = lastMsg.content.length;
-             }
-        }
-    }, [messages, isTyping, processMessage]);
 
     const callManager = useCallManager({ messages, setMessages, triggerAI, char });
     const {
@@ -1180,6 +1150,30 @@ ${rawLog.substring(0, 8000)}`;
             setReplyTarget(null);
         }
         await DB.saveMessage(msgPayload);
+
+        // Detect XHS link in user text and create xhs_card via MCP
+        if (type === 'text') {
+            const xhsUrlMatch = text.match(/xiaohongshu\.com\/(?:discovery\/item|explore)\/([a-f0-9]{24})/);
+            const mcpUrl = realtimeConfig?.xhsMcpConfig?.serverUrl;
+            if (xhsUrlMatch && mcpUrl && effectiveXhsEnabled && realtimeConfig?.xhsMcpConfig?.enabled) {
+                const noteUrl = `https://www.xiaohongshu.com/explore/${xhsUrlMatch[1]}`;
+                try {
+                    const result = await XhsMcpClient.getNoteDetail(mcpUrl, noteUrl);
+                    if (result.success && result.data) {
+                        const note = normalizeNote(result.data);
+                        await DB.saveMessage({
+                            charId: char.id,
+                            role: 'user',
+                            type: 'xhs_card',
+                            content: note.title || '小红书笔记',
+                            metadata: { xhsNote: note }
+                        });
+                    }
+                } catch (e) {
+                    console.warn('XHS link fetch via MCP failed:', e);
+                }
+            }
+        }
         if (type === 'text') EventBus.emit('Chat', '发送文本', text.slice(0, 24));
         else if (type === 'image') EventBus.emit('Chat', '发送图片', (metadata?.fileName || 'image').toString().slice(0, 24));
         else if (type === 'video') EventBus.emit('Chat', '发送视频', (metadata?.fileName || 'video').toString().slice(0, 24));
@@ -1474,9 +1468,6 @@ ${rawLog.substring(0, 8000)}`;
             {/* Dynamic Style Injection for Custom CSS */}
             {activeTheme.customCss && <style>{activeTheme.customCss}</style>}
 
-            {showIntifacePanel && (
-                <IntifacePanel onClose={() => setShowIntifacePanel(false)} />
-            )}
 
             <ChatModals
                 modalType={modalType}
@@ -1520,6 +1511,15 @@ ${rawLog.substring(0, 8000)}`;
                 translateTargetLang={translateTargetLang}
                 onSetTranslateSourceLang={handleSetTranslateSourceLang}
                 onSetTranslateLang={handleSetTranslateLang}
+                xhsEnabled={effectiveXhsEnabled}
+                onToggleXhs={async () => {
+                    if (!char) return;
+                    const val = !effectiveXhsEnabled;
+                    const newChar = { ...char, xhsEnabled: val };
+                    await DB.saveCharacter(newChar);
+                    updateCharacter(char.id, newChar);
+                    addToast(val ? '已开启小红书' : '已关闭小红书', val ? 'success' : 'info');
+                }}
                 onTransfer={() => { if (transferAmt) handleSendText('[转账]', 'transfer', { amount: transferAmt }); setModalType('none'); }}
                 onImportEmoji={handleImportEmoji}
                 onSaveSettings={saveSettings}
@@ -1941,15 +1941,6 @@ ${rawLog.substring(0, 8000)}`;
                                         </svg>
                                     </div>
                                     <span className="text-xs font-bold">重新生成</span>
-                                </button>
-
-                                <button onClick={() => { setShowPanel('none'); setShowIntifacePanel(true); }} className="flex flex-col items-center gap-2 text-slate-600 active:scale-95 transition-transform">
-                                    <div className="w-14 h-14 bg-rose-50 rounded-2xl flex items-center justify-center shadow-sm text-rose-500 border border-rose-100">
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor" className="w-6 h-6">
-                                            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
-                                        </svg>
-                                    </div>
-                                    <span className="text-xs font-bold">玩具控制</span>
                                 </button>
 
                             </div>

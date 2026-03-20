@@ -1,18 +1,12 @@
-
 /**
- * XHS MCP Client — 通过 xiaohongshu-mcp (浏览器自动化) 操作小红书
+ * XHS MCP Client — 双模 (MCP + Bridge)
  *
- * 实现 MCP Streamable HTTP 协议:
- * - POST JSON-RPC 2.0 到 /mcp
- * - Accept: application/json, text/event-stream
- * - 初始化握手: initialize → 获取 Mcp-Session-Id → notifications/initialized
- * - 后续请求带 Mcp-Session-Id header
- * - 响应可能是 JSON 或 SSE (text/event-stream)
+ * - MCP 模式: JSON-RPC Streamable HTTP
+ * - Bridge 模式: REST API (/api/...)
  *
- * 注意: xiaohongshu-mcp 服务器的 CORS 缺少 Access-Control-Expose-Headers，
- * 导致浏览器无法读取 Mcp-Session-Id。需要通过 scripts/mcp-proxy.mjs 代理。
- *
- * Server: https://github.com/xpzouying/xiaohongshu-mcp
+ * 自动根据 serverUrl 判断:
+ * - 含 /api → Bridge
+ * - 其他 → MCP
  */
 
 export interface McpToolResult {
@@ -21,56 +15,39 @@ export interface McpToolResult {
     error?: string;
 }
 
-interface McpJsonRpcRequest {
-    jsonrpc: '2.0';
-    method: string;
-    params?: any;
-    id?: number;  // notifications don't have id
-}
+type BackendMode = 'mcp' | 'bridge';
 
-interface McpJsonRpcResponse {
-    jsonrpc: '2.0';
-    id?: number;
-    result?: any;
-    error?: { code: number; message: string; data?: any };
-}
+const detectMode = (serverUrl: string): BackendMode => {
+    if (serverUrl.includes('/api')) return 'bridge';
+    return 'mcp';
+};
 
-// ==================== Session State ====================
+// ==================== MCP Session State ====================
 
 let requestIdCounter = 0;
 let currentSessionId: string | null = null;
-let isInitialized = false;
+let mcpInitialized = false;
 let discoveredTools: { name: string; description?: string }[] = [];
 
 // ==================== Tool Name Resolution ====================
 
-/**
- * 工具名别名表 — 覆盖不同版本 xiaohongshu-mcp 可能使用的名称
- * key = 我们的标准名, value = 服务器可能用的候选名（按优先级）
- */
 const TOOL_NAME_ALIASES: Record<string, string[]> = {
-    'check_login':     ['check_login', 'checkLogin', 'check_login_status', 'checkLoginStatus'],
-    'search':          ['search', 'search_notes', 'searchNotes', 'search_feeds', 'searchFeeds'],
-    'get_recommend':   ['get_recommend', 'getRecommend', 'list_feeds', 'listFeeds', 'get_feed_list', 'getFeedList', 'list_notes', 'listNotes'],
+    'check_login': ['check_login', 'checkLogin', 'check_login_status', 'checkLoginStatus'],
+    'search': ['search', 'search_notes', 'searchNotes', 'search_feeds', 'searchFeeds'],
+    'get_recommend': ['get_recommend', 'getRecommend', 'list_feeds', 'listFeeds', 'get_feed_list', 'getFeedList', 'list_notes', 'listNotes'],
     'get_note_detail': ['get_note_detail', 'getNoteDetail', 'get_feed_detail', 'getFeedDetail'],
-    'publish_note':    ['publish_note', 'publishNote', 'publish_post', 'publishPost', 'publish_content', 'publishContent'],
-    'comment':         ['comment', 'post_comment', 'postComment', 'post_comment_to_feed', 'postCommentToFeed'],
-    'get_user_info':   ['get_user_info', 'getUserInfo', 'get_user_profile', 'getUserProfile', 'user_profile', 'userProfile'],
-    'like_feed':       ['like_feed', 'likeFeed', 'like_note', 'likeNote'],
-    'favorite_feed':   ['favorite_feed', 'favoriteFeed', 'favorite_note', 'favoriteNote', 'collect_note', 'collectNote'],
-    'reply_comment':   ['reply_comment', 'replyComment', 'reply_comment_in_feed', 'replyCommentInFeed'],
+    'publish_note': ['publish_note', 'publishNote', 'publish_post', 'publishPost', 'publish_content', 'publishContent'],
+    'comment': ['comment', 'post_comment', 'postComment', 'post_comment_to_feed', 'postCommentToFeed'],
+    'get_user_info': ['get_user_info', 'getUserInfo', 'get_user_profile', 'getUserProfile', 'user_profile', 'userProfile'],
+    'like_feed': ['like_feed', 'likeFeed', 'like_note', 'likeNote'],
+    'favorite_feed': ['favorite_feed', 'favoriteFeed', 'favorite_note', 'favoriteNote', 'collect_note', 'collectNote'],
+    'reply_comment': ['reply_comment', 'replyComment', 'reply_comment_in_feed', 'replyCommentInFeed'],
 };
 
-/**
- * 根据服务器实际可用的工具列表，解析我们想要调用的工具名
- */
 const resolveToolName = (desiredName: string): string => {
     if (!discoveredTools.length) return desiredName;
-
-    // 1. Exact match
     if (discoveredTools.some(t => t.name === desiredName)) return desiredName;
 
-    // 2. Check alias table
     const aliases = TOOL_NAME_ALIASES[desiredName];
     if (aliases) {
         for (const alias of aliases) {
@@ -78,30 +55,20 @@ const resolveToolName = (desiredName: string): string => {
         }
     }
 
-    // 3. Normalized match (remove _ and lowercase)
     const norm = (s: string) => s.replace(/[_-]/g, '').toLowerCase();
     const desired = norm(desiredName);
     const match = discoveredTools.find(t => norm(t.name) === desired);
     if (match) return match.name;
 
-    // 4. Fallback — return original and let server error
-    console.warn(`[MCP] 未找到工具 "${desiredName}" 的匹配，可用: ${discoveredTools.map(t => t.name).join(', ')}`);
+    console.warn(`[MCP] 未找到工具"${desiredName}"的匹配，可用: ${discoveredTools.map(t => t.name).join(', ')}`);
     return desiredName;
 };
 
-/**
- * 从小红书笔记 URL 中提取 noteId
- * 支持格式: https://www.xiaohongshu.com/explore/xxxx?xsec_token=yyy
- */
 const extractNoteIdFromUrl = (url: string): string => {
-    // 尝试从 URL 提取 noteId
     const match = url.match(/\/explore\/([a-f0-9]+)/i) || url.match(/\/discovery\/item\/([a-f0-9]+)/i) || url.match(/\/([a-f0-9]{24})/);
-    return match ? match[1] : url; // fallback: 原值可能本身就是 feed_id
+    return match ? match[1] : url;
 };
 
-/**
- * 从 URL query string 中提取 xsec_token
- */
 const extractXsecTokenFromUrl = (url: string): string | undefined => {
     try {
         const u = new URL(url);
@@ -111,19 +78,58 @@ const extractXsecTokenFromUrl = (url: string): string | undefined => {
     }
 };
 
+// ==================== Auto-extract helpers ====================
+
 /**
- * 根据目标工具名适配参数名（不同服务器版本参数名可能不同）
+ * 从 feed/recommend 响应中提取第一个可用的 xsec_token
+ * 支持多种嵌套格式: [{ xsec_token }], { data: [{ xsec_token }] }, { items: [...] }, 纯文本等
  */
+const extractFirstXsecToken = (data: any): string | undefined => {
+    if (!data) return undefined;
+
+    const scanArray = (arr: any[]): string | undefined => {
+        for (const item of arr) {
+            const token = item?.xsec_token || item?.xsecToken
+                || item?.noteCard?.xsec_token || item?.noteCard?.xsecToken;
+            if (token) return token;
+        }
+        return undefined;
+    };
+
+    if (Array.isArray(data)) return scanArray(data);
+
+    for (const key of ['items', 'notes', 'feeds', 'data', 'list', 'results', 'note_list', 'noteList']) {
+        if (Array.isArray(data[key])) {
+            const token = scanArray(data[key]);
+            if (token) return token;
+        }
+    }
+
+    if (data.data && typeof data.data === 'object' && !Array.isArray(data.data)) {
+        for (const key of ['items', 'notes', 'feeds', 'list', 'results', 'note_list', 'noteList']) {
+            if (Array.isArray(data.data[key])) {
+                const token = scanArray(data.data[key]);
+                if (token) return token;
+            }
+        }
+        if (Array.isArray(data.data)) return scanArray(data.data);
+    }
+
+    if (typeof data === 'string') {
+        const match = data.match(/xsec_token[=:]["']?\s*([A-Za-z0-9+/=]+)/);
+        if (match) return match[1];
+    }
+
+    return undefined;
+};
+
 const adaptParams = (resolvedName: string, args: Record<string, any>): Record<string, any> => {
     const norm = resolvedName.replace(/[_-]/g, '').toLowerCase();
-
-    // "url" field → "feed_id" (+ xsec_token) for servers that use feed_id
     if (args.url && !args.feed_id) {
         const feedIdTools = ['getfeeddetail', 'getnotedetail', 'postcomment', 'postcommenttofeed', 'replycommentinfeed'];
         if (feedIdTools.some(n => norm === n)) {
             const adapted = { ...args };
             adapted.feed_id = extractNoteIdFromUrl(args.url);
-            // 如果 URL 中有 xsec_token 且参数中没有，自动提取
             if (!adapted.xsec_token) {
                 const token = extractXsecTokenFromUrl(args.url);
                 if (token) adapted.xsec_token = token;
@@ -134,6 +140,22 @@ const adaptParams = (resolvedName: string, args: Record<string, any>): Record<st
     }
     return args;
 };
+
+// ==================== MCP JSON-RPC ====================
+
+interface McpJsonRpcRequest {
+    jsonrpc: '2.0';
+    method: string;
+    params?: any;
+    id?: number;
+}
+
+interface McpJsonRpcResponse {
+    jsonrpc: '2.0';
+    id?: number;
+    result?: any;
+    error?: { code: number; message: string; data?: any };
+}
 
 const buildRequest = (method: string, params?: any, isNotification = false): McpJsonRpcRequest => {
     const req: McpJsonRpcRequest = {
@@ -147,50 +169,28 @@ const buildRequest = (method: string, params?: any, isNotification = false): Mcp
     return req;
 };
 
-// ==================== SSE Response Parser ====================
-
-/**
- * 解析 SSE (text/event-stream) 响应
- * 格式: event: message\ndata: {...}\n\n
- */
 const parseSseResponse = (text: string): McpJsonRpcResponse | null => {
     const lines = text.split('\n');
     const dataLines: string[] = [];
-
     for (const line of lines) {
-        if (line.startsWith('data: ')) {
-            dataLines.push(line.slice(6));
-        } else if (line.startsWith('data:')) {
-            dataLines.push(line.slice(5));
-        }
+        if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5));
     }
-
     if (dataLines.length === 0) return null;
-
-    // Try parsing each data line as JSON-RPC (take the last valid one)
     for (let i = dataLines.length - 1; i >= 0; i--) {
-        try {
-            return JSON.parse(dataLines[i]);
-        } catch { continue; }
+        try { return JSON.parse(dataLines[i]); } catch { /* ignore */ }
     }
     return null;
 };
 
-/**
- * 解析响应 — 自动处理 JSON 和 SSE 两种格式
- */
 const parseResponse = (text: string, contentType: string): McpJsonRpcResponse => {
-    // SSE format
     if (contentType.includes('text/event-stream') || text.trimStart().startsWith('event:') || text.trimStart().startsWith('data:')) {
         const parsed = parseSseResponse(text);
         if (parsed) return parsed;
     }
-
-    // Plain JSON
     try {
         return JSON.parse(text);
     } catch {
-        // Fallback: try to find JSON in the text
         const match = text.match(/\{[\s\S]*\}/);
         if (match) {
             try { return JSON.parse(match[0]); } catch { /* fall through */ }
@@ -199,11 +199,6 @@ const parseResponse = (text: string, contentType: string): McpJsonRpcResponse =>
     }
 };
 
-// ==================== Core HTTP ====================
-
-/**
- * 发送 MCP JSON-RPC 请求
- */
 const mcpPost = async (
     serverUrl: string,
     body: McpJsonRpcRequest,
@@ -213,10 +208,7 @@ const mcpPost = async (
         'Content-Type': 'application/json',
         'Accept': 'application/json, text/event-stream',
     };
-
-    if (currentSessionId) {
-        headers['Mcp-Session-Id'] = currentSessionId;
-    }
+    if (currentSessionId) headers['Mcp-Session-Id'] = currentSessionId;
 
     const resp = await fetch(serverUrl, {
         method: 'POST',
@@ -224,136 +216,80 @@ const mcpPost = async (
         body: JSON.stringify(body),
     });
 
-    // Extract session ID from response
     const sessionId = resp.headers.get('Mcp-Session-Id') || resp.headers.get('mcp-session-id');
-
-    // 202 Accepted = notification acknowledged, no body
     if (resp.status === 202) {
         return { response: null, sessionId };
     }
-
     if (!resp.ok) {
         const errText = await resp.text().catch(() => '');
         throw new Error(`MCP HTTP ${resp.status}: ${errText.slice(0, 200)}`);
     }
-
-    if (!expectResponse) {
-        return { response: null, sessionId };
-    }
+    if (!expectResponse) return { response: null, sessionId };
 
     const contentType = resp.headers.get('content-type') || '';
     const text = await resp.text();
     const parsed = parseResponse(text, contentType);
-
     return { response: parsed, sessionId };
 };
 
-/**
- * 完整的 MCP 调用（带自动初始化）
- */
-const mcpCall = async (serverUrl: string, method: string, params?: any): Promise<McpJsonRpcResponse> => {
-    // Auto-initialize if needed
-    if (!isInitialized) {
-        await doInitialize(serverUrl);
-    }
-
-    const body = buildRequest(method, params);
-    const { response } = await mcpPost(serverUrl, body);
-
-    if (!response) {
-        throw new Error('MCP: 未收到响应');
-    }
-    return response;
-};
-
-// ==================== Initialize Handshake ====================
-
-const doInitialize = async (serverUrl: string): Promise<void> => {
-    // Step 1: Send initialize request
+const mcpInitialize = async (serverUrl: string): Promise<void> => {
     const initReq = buildRequest('initialize', {
         protocolVersion: '2024-11-05',
         capabilities: {},
-        clientInfo: { name: 'AetherOS-XhsFreeRoam', version: '1.0.0' },
+        clientInfo: { name: 'NovaClaw-XHS', version: '1.0.0' },
     });
-
     const { response, sessionId } = await mcpPost(serverUrl, initReq);
-
-    // Store session ID if provided
-    if (sessionId) {
-        currentSessionId = sessionId;
-    }
-
-    if (response?.error) {
-        throw new Error(`MCP Initialize failed: ${response.error.message}`);
-    }
-
-    // Detect CORS issue: server should have returned a session ID
+    if (sessionId) currentSessionId = sessionId;
+    if (response?.error) throw new Error(`MCP Initialize failed: ${response.error.message}`);
     if (!currentSessionId) {
-        console.warn(
-            '[MCP] ⚠️ 无法读取 Mcp-Session-Id 响应头（CORS 限制）。\n' +
-            '请使用 CORS 代理: node scripts/mcp-proxy.mjs\n' +
-            '然后把 MCP URL 改为 http://localhost:18061/mcp'
-        );
+        console.warn('[MCP] 无法读取 Mcp-Session-Id（CORS 限制）');
         throw new Error(
-            'MCP 连接失败: 浏览器 CORS 限制无法读取 Session ID。\n' +
-            '请运行 CORS 代理: node scripts/mcp-proxy.mjs\n' +
-            '然后把设置里的 MCP URL 改为 http://localhost:18061/mcp'
+            'MCP 连接失败: CORS 限制无法读取 Session ID。\n请运行 CORS 代理: node scripts/mcp-proxy.mjs\n然后设置 MCP URL 为 http://localhost:18061/mcp'
         );
     }
-
-    // Step 2: Send initialized notification (no id, no response expected)
     const notifReq = buildRequest('notifications/initialized', {}, true);
     await mcpPost(serverUrl, notifReq, false);
 
-    // Step 3: Discover available tools
     try {
         const toolsReq = buildRequest('tools/list');
         const { response: toolsResp } = await mcpPost(serverUrl, toolsReq);
         if (toolsResp?.result?.tools) {
             discoveredTools = toolsResp.result.tools.map((t: any) => ({ name: t.name, description: t.description }));
-            console.log('[MCP] 发现工具:', discoveredTools.map(t => t.name).join(', '));
+            console.log('[MCP] tools:', discoveredTools.map(t => t.name).join(', '));
         }
     } catch (e) {
-        console.warn('[MCP] tools/list 调用失败，将使用默认工具名', e);
+        console.warn('[MCP] tools/list 失败，使用默认工具名', e);
     }
 
-    isInitialized = true;
+    mcpInitialized = true;
 };
 
-/**
- * 调用 MCP Tool
- */
-const callTool = async (serverUrl: string, toolName: string, args: Record<string, any> = {}): Promise<McpToolResult> => {
+const mcpCall = async (serverUrl: string, method: string, params?: any): Promise<McpJsonRpcResponse> => {
+    if (!mcpInitialized) await mcpInitialize(serverUrl);
+    const body = buildRequest(method, params);
+    const { response } = await mcpPost(serverUrl, body);
+    if (!response) throw new Error('MCP: 未收到响应');
+    return response;
+};
+
+const mcpCallTool = async (serverUrl: string, toolName: string, args: Record<string, any> = {}): Promise<McpToolResult> => {
     try {
-        // 必须先初始化，否则 discoveredTools 为空，resolveToolName 无法正确映射
-        if (!isInitialized) {
-            await doInitialize(serverUrl);
-        }
+        if (!mcpInitialized) await mcpInitialize(serverUrl);
         const resolved = resolveToolName(toolName);
         const adapted = adaptParams(resolved, args);
-        if (resolved !== toolName) {
-            console.log(`[MCP] 工具名映射: ${toolName} → ${resolved}`);
-        }
         const resp = await mcpCall(serverUrl, 'tools/call', { name: resolved, arguments: adapted });
 
         if (resp.error) {
             return { success: false, error: `MCP Error [${resp.error.code}]: ${resp.error.message}` };
         }
 
-        // MCP tool results come as content array
         const result = resp.result;
         if (result?.content) {
             const textParts = result.content
                 .filter((c: any) => c.type === 'text')
                 .map((c: any) => c.text);
             const fullText = textParts.join('\n');
-            console.log(`[MCP] ${toolName} 响应文本长度: ${fullText.length}, 前200字: ${fullText.slice(0, 200)}`);
-
-            // MCP tool-level error: result.isError = true
-            if (result.isError) {
-                return { success: false, error: fullText || 'MCP 工具执行失败' };
-            }
-            // Try parsing as JSON
+            if (result.isError) return { success: false, error: fullText || 'MCP 工具执行失败' };
             try {
                 const parsed = JSON.parse(fullText);
                 return { success: true, data: parsed };
@@ -361,9 +297,39 @@ const callTool = async (serverUrl: string, toolName: string, args: Record<string
                 return { success: true, data: fullText };
             }
         }
-
-        console.log(`[MCP] ${toolName} 无 content 字段, result keys:`, result ? Object.keys(result) : 'null');
         return { success: true, data: result };
+    } catch (e: any) {
+        return { success: false, error: e.message };
+    }
+};
+
+// ==================== Bridge (REST) ====================
+
+const bridgePost = async (serverUrl: string, path: string, body: any = {}): Promise<McpToolResult> => {
+    const baseUrl = serverUrl.replace(/\/+$/, '').replace(/\/api$/, '');
+    const url = `${baseUrl}/api/${path}`;
+    try {
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const text = await resp.text();
+        let data: any = null;
+        try { data = JSON.parse(text); } catch { data = text; }
+
+        if (resp.status === 401) {
+            return { success: false, error: '未登录，请先在浏览器中登录小红书' };
+        }
+        if (!resp.ok) {
+            const errMsg = typeof data === 'string' ? data : (data?.error || data?.message || JSON.stringify(data));
+            return { success: false, error: `Bridge HTTP ${resp.status}: ${errMsg}` };
+        }
+        if (data && typeof data === 'object') {
+            if ('code' in data && data.code !== 0) return { success: false, error: data.message || data.error || 'Bridge Error' };
+            if (data.error) return { success: false, error: data.error };
+        }
+        return { success: true, data: data?.data ?? data };
     } catch (e: any) {
         return { success: false, error: e.message };
     }
@@ -373,224 +339,301 @@ const callTool = async (serverUrl: string, toolName: string, args: Record<string
 
 export const XhsMcpClient = {
 
-    /**
-     * 重置会话状态（重新连接时调用）
-     */
     resetSession: () => {
         currentSessionId = null;
-        isInitialized = false;
+        mcpInitialized = false;
         requestIdCounter = 0;
         discoveredTools = [];
     },
 
-    /**
-     * 测试连接并初始化
-     */
-    testConnection: async (serverUrl: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean }> => {
+    testConnection: async (serverUrl: string): Promise<{ connected: boolean; tools?: string[]; error?: string; nickname?: string; userId?: string; loggedIn?: boolean; xsecToken?: string }> => {
+        const mode = detectMode(serverUrl);
         try {
-            // Reset state for fresh test
+            if (mode === 'bridge') {
+                const ping = await bridgePost(serverUrl, 'check-login');
+                if (!ping.success) return { connected: false, error: ping.error };
+                const d = ping.data;
+                let loggedIn = false;
+                let nickname: string | undefined;
+                let userId: string | undefined;
+                let xsecToken: string | undefined;
+                if (typeof d === 'string') {
+                    loggedIn = d.includes('已登录');
+                    const nameMatch = d.match(/昵称[:：]\s*(.+)/);
+                    if (nameMatch) nickname = nameMatch[1].trim();
+                    const idMatch = d.match(/(?:user_id|userId|red_id|ID)[:：\s]*(\S+)/i);
+                    if (idMatch) userId = idMatch[1].trim();
+                } else {
+                    loggedIn = !!(d.logged_in || d.loggedIn || d.is_logged_in || d.isLoggedIn);
+                    nickname = d.nickname || d.name || d.username || undefined;
+                    userId = d.user_id || d.userId || d.id || d.red_id || undefined;
+                    xsecToken = d.xsec_token || d.xsecToken || undefined;
+                }
+                if (loggedIn && !xsecToken) {
+                    try {
+                        const feedResult = await bridgePost(serverUrl, 'list-feeds');
+                        if (feedResult.success) xsecToken = extractFirstXsecToken(feedResult.data) || xsecToken;
+                    } catch { /* ignore */ }
+                }
+                return { connected: true, tools: ['bridge'], nickname, userId, loggedIn, xsecToken };
+            }
+
             XhsMcpClient.resetSession();
-
-            // Initialize handshake (also discovers tools)
-            await doInitialize(serverUrl);
-
-            // Tools already discovered during init
+            await mcpInitialize(serverUrl);
             const tools = discoveredTools.map(t => t.name);
-
-            // 尝试获取登录用户信息
             let nickname: string | undefined;
             let userId: string | undefined;
             let loggedIn = false;
+            let xsecToken: string | undefined;
             try {
-                const loginResult = await callTool(serverUrl, 'check_login', {});
+                const loginResult = await mcpCallTool(serverUrl, 'check_login');
                 if (loginResult.success && loginResult.data) {
                     const d = loginResult.data;
-                    // check_login_status 返回纯文本: "✅ 已登录\n用户名: xxx\n用户ID: yyy\n..."
                     if (typeof d === 'string') {
                         loggedIn = d.includes('已登录');
-                        const nameMatch = d.match(/用户名[:：]\s*(.+)/);
+                        const nameMatch = d.match(/昵称[:：]\s*(.+)/);
                         if (nameMatch) nickname = nameMatch[1].trim();
-                        // 尝试提取 user_id（多种格式）
-                        const idMatch = d.match(/(?:用户ID|user_id|userId|red_id|ID)[:：]\s*(\S+)/i);
+                        const idMatch = d.match(/(?:用户ID|user_id|userId|red_id|ID)[:：\s]*(\S+)/i);
                         if (idMatch) userId = idMatch[1].trim();
                     } else {
-                        // 兼容未来可能的 JSON 格式
                         loggedIn = !!(d.logged_in || d.loggedIn || d.is_logged_in || d.isLoggedIn);
                         nickname = d.nickname || d.name || d.username || undefined;
                         userId = d.user_id || d.userId || d.id || d.red_id || undefined;
+                        xsecToken = d.xsec_token || d.xsecToken || undefined;
                     }
-                    console.log(`[MCP] 登录状态: ${loggedIn ? '已登录' : '未登录'}${nickname ? `, 用户名: ${nickname}` : ''}${userId ? `, userId: ${userId}` : ''}`);
                 }
-            } catch (e) {
-                console.warn('[MCP] 获取登录状态失败，跳过:', e);
+            } catch { /* ignore */ }
+            if (loggedIn && !xsecToken) {
+                try {
+                    const feedResult = await mcpCallTool(serverUrl, 'get_recommend');
+                    if (feedResult.success) xsecToken = extractFirstXsecToken(feedResult.data) || xsecToken;
+                } catch { /* ignore */ }
             }
-
-            return { connected: true, tools, nickname, userId, loggedIn };
+            return { connected: true, tools, nickname, userId, loggedIn, xsecToken };
         } catch (e: any) {
             return { connected: false, error: e.message };
         }
     },
 
-    /**
-     * 确保已初始化（在 run 开始时调用）
-     */
     ensureInitialized: async (serverUrl: string): Promise<void> => {
-        if (!isInitialized) {
+        if (detectMode(serverUrl) === 'mcp' && !mcpInitialized) {
             XhsMcpClient.resetSession();
-            await doInitialize(serverUrl);
+            await mcpInitialize(serverUrl);
         }
     },
 
-    /**
-     * 检查小红书登录状态
-     */
     checkLogin: async (serverUrl: string): Promise<McpToolResult> => {
-        return callTool(serverUrl, 'check_login');
+        return detectMode(serverUrl) === 'bridge'
+            ? bridgePost(serverUrl, 'check-login')
+            : mcpCallTool(serverUrl, 'check_login');
     },
 
-    /**
-     * 搜索小红书笔记
-     */
-    search: async (serverUrl: string, keyword: string): Promise<McpToolResult> => {
-        return callTool(serverUrl, 'search', { keyword });
+    search: async (serverUrl: string, keyword: string, options?: {
+        sort_by?: string; note_type?: string; publish_time?: string; search_scope?: string; location?: string;
+    }): Promise<McpToolResult> => {
+        return detectMode(serverUrl) === 'bridge'
+            ? bridgePost(serverUrl, 'search', { keyword, ...options })
+            : mcpCallTool(serverUrl, 'search', { keyword });
     },
 
-    /**
-     * 获取推荐内容 / 刷首页
-     */
     getRecommend: async (serverUrl: string): Promise<McpToolResult> => {
-        return callTool(serverUrl, 'get_recommend');
+        return detectMode(serverUrl) === 'bridge'
+            ? bridgePost(serverUrl, 'list-feeds')
+            : mcpCallTool(serverUrl, 'get_recommend');
     },
 
-    /**
-     * 获取笔记详情（含评论）
-     * @param xsecToken — 从搜索/推荐结果中获取的 xsec_token，get_feed_detail 需要此参数
-     * @param options.loadAllComments — 是否加载所有评论（滚动+展开更多回复），默认 false
-     */
     getNoteDetail: async (serverUrl: string, noteUrl: string, xsecToken?: string, options?: { loadAllComments?: boolean }): Promise<McpToolResult> => {
+        const feedId = extractNoteIdFromUrl(noteUrl);
+        const token = xsecToken || extractXsecTokenFromUrl(noteUrl) || '';
+
+        if (detectMode(serverUrl) === 'bridge') {
+            return bridgePost(serverUrl, 'get-feed-detail', {
+                feed_id: feedId, xsec_token: token,
+                ...(options?.loadAllComments ? { load_all_comments: true, click_more_replies: true } : {}),
+            });
+        }
         const args: Record<string, any> = { url: noteUrl };
-        if (xsecToken) args.xsec_token = xsecToken;
+        if (token) args.xsec_token = token;
         if (options?.loadAllComments) {
             args.load_all_comments = true;
             args.click_more_replies = true;
         }
-        return callTool(serverUrl, 'get_note_detail', args);
+        return mcpCallTool(serverUrl, 'get_note_detail', args);
     },
 
-    /**
-     * 发布图文笔记
-     */
     publishNote: async (serverUrl: string, params: {
-        title: string;
-        content: string;
-        images?: string[];
-        tags?: string[];
-        is_private?: boolean;
+        title: string; content: string; images?: string[]; tags?: string[]; is_private?: boolean;
     }): Promise<McpToolResult> => {
-        // 确保 images 始终传递（MCP 服务器 schema 可能将其标记为 required）
+        if (detectMode(serverUrl) === 'bridge') {
+            const isPrivate = !!params.is_private;
+            return bridgePost(serverUrl, 'publish', {
+                title: params.title, content: params.content,
+                images: params.images || [], tags: params.tags || [],
+                is_private: isPrivate,
+                visibility: isPrivate ? 'private' : undefined,
+            });
+        }
         const args = { ...params, images: params.images || [] };
-        return callTool(serverUrl, 'publish_note', args);
+        return mcpCallTool(serverUrl, 'publish_note', args);
     },
 
-    /**
-     * 评论笔记
-     * @param xsecToken — 从搜索/推荐结果中获取的 xsec_token，post_comment_to_feed 需要此参数
-     */
+    publishVideo: async (serverUrl: string, params: {
+        title: string; content: string; video: string; tags?: string[];
+    }): Promise<McpToolResult> => {
+        if (detectMode(serverUrl) === 'bridge') {
+            return bridgePost(serverUrl, 'publish-video', {
+                title: params.title, content: params.content,
+                video: params.video, tags: params.tags || [],
+            });
+        }
+        return { success: false, error: '视频发布仅在 Skills (Bridge) 模式下可用' };
+    },
+
+    publishLongArticle: async (serverUrl: string, params: {
+        title: string; content: string; images?: string[];
+    }): Promise<McpToolResult> => {
+        if (detectMode(serverUrl) === 'bridge') {
+            return bridgePost(serverUrl, 'long-article', {
+                title: params.title, content: params.content, images: params.images || [],
+            });
+        }
+        return { success: false, error: '长文发布仅在 Skills (Bridge) 模式下可用' };
+    },
+
     comment: async (serverUrl: string, noteUrl: string, content: string, xsecToken?: string): Promise<McpToolResult> => {
+        if (detectMode(serverUrl) === 'bridge') {
+            const feedId = extractNoteIdFromUrl(noteUrl);
+            const token = xsecToken || extractXsecTokenFromUrl(noteUrl) || '';
+            return bridgePost(serverUrl, 'post-comment', { feed_id: feedId, xsec_token: token, content });
+        }
         const args: Record<string, any> = { url: noteUrl, content };
         if (xsecToken) args.xsec_token = xsecToken;
-        return callTool(serverUrl, 'comment', args);
+        return mcpCallTool(serverUrl, 'comment', args);
     },
 
-    /**
-     * 点赞笔记
-     */
     likeFeed: async (serverUrl: string, feedId: string, xsecToken: string, unlike = false): Promise<McpToolResult> => {
-        return callTool(serverUrl, 'like_feed', { feed_id: feedId, xsec_token: xsecToken, ...(unlike ? { unlike: true } : {}) });
+        if (detectMode(serverUrl) === 'bridge') {
+            return bridgePost(serverUrl, 'like-feed', { feed_id: feedId, xsec_token: xsecToken, unlike });
+        }
+        return mcpCallTool(serverUrl, 'like_feed', { feed_id: feedId, xsec_token: xsecToken, ...(unlike ? { unlike: true } : {}) });
     },
 
-    /**
-     * 收藏笔记
-     */
     favoriteFeed: async (serverUrl: string, feedId: string, xsecToken: string, unfavorite = false): Promise<McpToolResult> => {
-        return callTool(serverUrl, 'favorite_feed', { feed_id: feedId, xsec_token: xsecToken, ...(unfavorite ? { unfavorite: true } : {}) });
+        if (detectMode(serverUrl) === 'bridge') {
+            return bridgePost(serverUrl, 'favorite-feed', { feed_id: feedId, xsec_token: xsecToken, unfavorite });
+        }
+        return mcpCallTool(serverUrl, 'favorite_feed', { feed_id: feedId, xsec_token: xsecToken, ...(unfavorite ? { unfavorite: true } : {}) });
     },
 
-    /**
-     * 回复评论
-     * @param userId — 评论作者的 user_id，MCP 服务端用它作为备选方式定位评论
-     * @param parentCommentId — 父评论 ID（回复子评论时需要），xiaohongshu-mcp PR#440+ 支持
-     */
     replyComment: async (serverUrl: string, feedId: string, xsecToken: string, content: string, commentId?: string, userId?: string, parentCommentId?: string): Promise<McpToolResult> => {
+        if (detectMode(serverUrl) === 'bridge') {
+            return bridgePost(serverUrl, 'reply-comment', {
+                feed_id: feedId, xsec_token: xsecToken, content,
+                comment_id: commentId, user_id: userId, parent_comment_id: parentCommentId,
+            });
+        }
         const args: Record<string, any> = { feed_id: feedId, xsec_token: xsecToken, content };
         if (commentId) args.comment_id = commentId;
         if (userId) args.user_id = userId;
         if (parentCommentId) args.parent_comment_id = parentCommentId;
-        return callTool(serverUrl, 'reply_comment', args);
+        return mcpCallTool(serverUrl, 'reply_comment', args);
     },
 
-    /**
-     * 获取用户主页信息（需要 user_id + xsec_token）
-     */
     getUserProfile: async (serverUrl: string, userId: string, xsecToken?: string): Promise<McpToolResult> => {
+        if (detectMode(serverUrl) === 'bridge') {
+            return bridgePost(serverUrl, 'user-profile', { user_id: userId, xsec_token: xsecToken || '' });
+        }
         const args: Record<string, any> = { user_id: userId };
         if (xsecToken) args.xsec_token = xsecToken;
-        return callTool(serverUrl, 'get_user_info', args);
+        return mcpCallTool(serverUrl, 'get_user_info', args);
+    },
+
+    login: async (serverUrl: string): Promise<McpToolResult> => {
+        if (detectMode(serverUrl) === 'bridge') return bridgePost(serverUrl, 'login');
+        return { success: false, error: '登录功能仅在 Skills (Bridge) 模式下可用' };
+    },
+
+    getQrcode: async (serverUrl: string): Promise<McpToolResult> => {
+        if (detectMode(serverUrl) === 'bridge') return bridgePost(serverUrl, 'get-qrcode');
+        return { success: false, error: '二维码功能仅在 Skills (Bridge) 模式下可用' };
+    },
+
+    logout: async (serverUrl: string): Promise<McpToolResult> => {
+        if (detectMode(serverUrl) === 'bridge') return bridgePost(serverUrl, 'delete-cookies');
+        return { success: false, error: '登出功能仅在 Skills (Bridge) 模式下可用' };
     },
 };
 
 // ==================== Helpers ====================
 
-/**
- * 从 MCP 返回的 data 中提取笔记数组 — 兼容各种格式
- */
 export const extractNotesFromMcpData = (data: any): any[] => {
     if (!data) return [];
-    // Direct array
-    if (Array.isArray(data)) return data;
-    // Common nested keys
-    for (const key of ['notes', 'items', 'feeds', 'data', 'list', 'results', 'note_list', 'noteList']) {
-        if (Array.isArray(data[key])) return data[key];
+    if (Array.isArray(data)) {
+        if (data.length > 0 && Array.isArray(data[0])) {
+            console.log(`[XHS] extractNotes: 检测到嵌套数组，展开(${data.length} 组)`);
+            return data.flat().filter((n: any) => n && typeof n === 'object' && !Array.isArray(n));
+        }
+        return data;
     }
-    // Deep search: find first array in the object
-    if (typeof data === 'object') {
-        for (const val of Object.values(data)) {
-            if (Array.isArray(val) && val.length > 0) {
-                console.log(`[MCP] extractNotes: 在 key 中找到数组, length=${val.length}`);
-                return val;
+    for (const key of ['notes', 'items', 'feeds', 'data', 'list', 'results', 'note_list', 'noteList']) {
+        if (Array.isArray(data[key])) {
+            const arr = data[key];
+            if (arr.length > 0 && Array.isArray(arr[0])) {
+                console.log(`[XHS] extractNotes: data.${key} 是嵌套数组，展开`);
+                return arr.flat().filter((n: any) => n && typeof n === 'object' && !Array.isArray(n));
+            }
+            return arr;
+        }
+    }
+    if (data.data && typeof data.data === 'object' && !Array.isArray(data.data)) {
+        for (const key of ['notes', 'items', 'feeds', 'list', 'results', 'note_list', 'noteList']) {
+            if (Array.isArray(data.data[key])) {
+                console.log(`[XHS] extractNotes: 从 data.data.${key} 找到数组, length=${data.data[key].length}`);
+                return data.data[key];
             }
         }
     }
-    // If data is a string (non-JSON text), return empty
+    if (typeof data === 'object') {
+        const skipKeys = new Set(['interactions', 'tags', 'images', 'comments', 'replies']);
+        for (const [key, val] of Object.entries(data)) {
+            if (skipKeys.has(key)) continue;
+            if (Array.isArray(val) && (val as any[]).length > 0) {
+                const first = (val as any[])[0];
+                if (first && typeof first === 'object' &&
+                    (first.noteId || first.note_id || first.id || first.noteCard ||
+                        first.displayTitle || first.title || first.desc || first.cover)) {
+                    console.log(`[XHS] extractNotes: 在 key "${key}" 中找到笔记数组 length=${(val as any[]).length}`);
+                    return val as any[];
+                }
+            }
+        }
+    }
     if (typeof data === 'string') {
-        console.warn('[MCP] extractNotes: data 是纯文本，无法提取笔记:', data.slice(0, 200));
+        console.warn('[XHS] extractNotes: data 是纯文本，无法提取笔记', data.slice(0, 200));
         return [];
     }
-    console.warn('[MCP] extractNotes: 未找到笔记数组, data keys:', Object.keys(data));
+    console.warn('[XHS] extractNotes: 未找到笔记数组 data keys:', Object.keys(data));
     return [];
 };
 
-/**
- * 将 MCP 笔记数据标准化为 XhsNote 格式
- */
 export const normalizeNote = (n: any): { noteId: string; title: string; desc: string; author: string; authorId: string; likes: number; xsecToken?: string; coverUrl?: string; type?: string } => {
-    // 兼容 noteCard (camelCase) 和 notecard (lowercase) 两种格式
     const card = n.noteCard || n.notecard;
-    // 封面图 — 小红书 noteCard.cover 可能是对象 {url, urlDefault, urlPre} 或直接字符串
     const coverObj = card?.cover || n.cover;
     const rawCoverUrl = typeof coverObj === 'string' ? coverObj
         : coverObj?.urlDefault || coverObj?.url_default || coverObj?.url || coverObj?.urlPre || undefined;
-    // 强制 HTTPS — 避免移动端 WebView 混合内容被拦截 & 防盗链问题
     const coverUrl = rawCoverUrl?.replace(/^http:\/\//, 'https://');
+    const likesRaw = n.likes || n.liked_count
+        || n.interact_info?.liked_count || n.interactInfo?.likedCount
+        || card?.interact_info?.liked_count || card?.interactInfo?.likedCount || 0;
     return {
         noteId: n.noteId || n.note_id || n.id || card?.note_id || card?.noteId || '',
         title: n.title || n.display_title || n.displayTitle || card?.display_title || card?.displayTitle || '',
-        desc: (n.desc || n.description || n.content || card?.desc || card?.description || '').slice(0, 500),
-        author: n.author || n.nickname || n.user?.nickname || card?.user?.nickname || '',
-        authorId: n.authorId || n.author_id || n.user?.user_id || card?.user?.user_id || '',
-        likes: n.likes || n.liked_count || n.interact_info?.liked_count || card?.interact_info?.liked_count || card?.interactInfo?.likedCount || 0,
+        desc: (n.desc || n.description || n.content || card?.desc || card?.description || card?.title || '').slice(0, 500),
+        author: n.author || n.nickname || n.user?.nickname || n.user?.name || card?.user?.nickname || card?.user?.name || '',
+        authorId: n.authorId || n.author_id || n.user?.user_id || n.user?.userId || card?.user?.user_id || card?.user?.userId || '',
+        likes: typeof likesRaw === 'string' ? parseInt(likesRaw, 10) || 0 : (likesRaw || 0),
         xsecToken: n.xsecToken || n.xsec_token || card?.xsec_token || card?.xsecToken || undefined,
         coverUrl,
-        type: n.type || card?.type || undefined,  // 'normal' | 'video'
+        type: n.type || card?.type || undefined,
     };
 };

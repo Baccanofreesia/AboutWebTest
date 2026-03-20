@@ -31,6 +31,13 @@ export const Icons: Record<string, React.FC<{ className?: string }>> = {
       <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" />
     </svg>
   ),
+  XhsStock: ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={className}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 6.75A2.25 2.25 0 0 1 5.25 4.5h13.5A2.25 2.25 0 0 1 21 6.75v10.5A2.25 2.25 0 0 1 18.75 19.5H5.25A2.25 2.25 0 0 1 3 17.25V6.75Z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 14.25 10.5 11.25l3.75 3.75L16.5 12l3 3" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 9h.008v.008H8.25V9Z" />
+    </svg>
+  ),
   ThemeMaker: ({ className }) => (
     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={className}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M9.53 16.122a3 3 0 0 0-5.78 1.128 2.25 2.25 0 0 1-2.4 2.245 4.5 4.5 0 0 0 8.4-2.245c0-.399-.078-.78-.22-1.128Zm0 0a15.998 15.998 0 0 0 3.388-1.62m-5.043-.025a15.994 15.994 0 0 1 1.622-3.395m3.42 3.42a15.995 15.995 0 0 0 4.764-4.648l3.876-5.814a1.151 1.151 0 0 0-1.597-1.597L14.146 6.32a15.996 15.996 0 0 0-4.649 4.763m3.42 3.42a6.776 6.776 0 0 0-3.42-3.42" />
@@ -90,6 +97,7 @@ export const INSTALLED_APPS: AppConfig[] = [
   { id: AppID.Appearance, name: '外观', icon: 'Appearance', color: 'bg-gradient-to-br from-slate-400 to-slate-600' },
   { id: AppID.Study, name: '自习室', icon: 'Study', color: 'bg-gradient-to-br from-emerald-400 to-teal-500' },
   { id: AppID.FreeRoam, name: '自由活动', icon: 'FreeRoam', color: 'bg-gradient-to-br from-red-400 to-pink-500' },
+  { id: AppID.XhsStock, name: '小红书图库', icon: 'XhsStock', color: 'bg-gradient-to-br from-rose-400 to-red-500' },
   { id: AppID.Music, name: '音乐', icon: 'Music', color: 'bg-gradient-to-br from-indigo-400 to-purple-500' },
   { id: AppID.Browser, name: '浏览器', icon: 'Browser', color: 'bg-gradient-to-br from-blue-400 to-cyan-500' },
   { id: AppID.Settings, name: '设置', icon: 'Settings', color: 'bg-gradient-to-br from-gray-400 to-slate-500' },

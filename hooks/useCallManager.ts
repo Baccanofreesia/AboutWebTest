@@ -81,6 +81,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
     const callSessionIdRef = useRef('');
     const callActiveRef = useRef(false);
     const callStateRef = useRef<CallState>('idle');
+    const callDirectionRef = useRef<CallDirection | null>(null);
     const callStartedAtRef = useRef<number | null>(null);
     const callBubblesRef = useRef<CallBubble[]>([]);
     const callDecisionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -136,7 +137,11 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
     const userNameLine = userProfile.nickname && userProfile.name && userProfile.nickname !== userProfile.name
         ? `用户昵称：${userProfile.nickname}；用户名字：${userProfile.name}。`
         : `用户名字：${userRealName}。`;
-    const callInitiative = clampNumber(char?.callInitiative, 0, 1, 0.5);
+    const rawCallInitiative = Number(char?.callInitiative);
+    const normalizedCallInitiative = Number.isFinite(rawCallInitiative) && rawCallInitiative > 1
+        ? rawCallInitiative / 100
+        : rawCallInitiative;
+    const callInitiative = clampNumber(normalizedCallInitiative, 0, 1, 0.5);
 
     useEffect(() => {
         callMicMutedRef.current = callMicMuted;
@@ -385,6 +390,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
     }, [callState, setGlobalCallState]);
 
     useEffect(() => {
+        callDirectionRef.current = callDirection;
         if (callDirection) setGlobalCallDirection(callDirection);
     }, [callDirection, setGlobalCallDirection]);
 
@@ -600,11 +606,12 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
         }
 
         let hint = '';
-        if (scenario === 'user_cancel') hint = `（事实：${userDisplayName}给你打电话，你是被叫；状态：未接通；动作：${userDisplayName}在你接听前取消。结合你的人设与上下文语境自然措辞，发一条简短消息。）`;
-        else if (scenario === 'agent_decline') hint = `（事实：${userDisplayName}给你打电话，你是被叫；状态：未接通；动作：你没有接听（拒接/未接）。可根据你的人设与上下文决定是否解释。）`;
-        else if (scenario === 'agent_cancel') hint = `（事实：你给${userDisplayName}打电话，你是主动呼叫；状态：未接通；动作：${userDisplayName}未接（不是你取消）。结合你的人设与上下文语境，自然给${userDisplayName}发一条消息。）`;
-        else if (scenario === 'user_decline') hint = `（事实：你给${userDisplayName}打电话，你是主动呼叫；状态：未接通；动作：${userDisplayName}拒接。结合人设与语境，发一条理解或询问的消息。）`;
-        else if (scenario === 'user_hangup_during_call') hint = `（事实：通话中，${userDisplayName}在你说话或思考时突然挂断了。动作：结合人设与语境，自言自语或发一条消息表达反应（如惊讶、疑惑、无奈等）。）`;
+        const followupModeHint = '（当前为文字聊天模式：不要出现[通话]或电话口吻，不要输出通话标记，用简短的IM句子。）';
+        if (scenario === 'user_cancel') hint = `（事实：${userDisplayName}给你打电话，你是被叫；状态：未接通；动作：${userDisplayName}在你接听前取消。结合你的人设与上下文语境自然措辞，发一条简短消息。${followupModeHint}）`;
+        else if (scenario === 'agent_decline') hint = `（事实：${userDisplayName}给你打电话，你是被叫；状态：未接通；动作：你没有接听（拒接/未接）。可根据你的人设与上下文决定是否解释。${followupModeHint}）`;
+        else if (scenario === 'agent_cancel') hint = `（事实：你给${userDisplayName}打电话，你是主动呼叫；状态：未接通；动作：${userDisplayName}未接（不是你取消）。结合你的人设与上下文语境，自然给${userDisplayName}发一条消息。${followupModeHint}）`;
+        else if (scenario === 'user_decline') hint = `（事实：你给${userDisplayName}打电话，你是主动呼叫；状态：未接通；动作：${userDisplayName}拒接。结合人设与语境，发一条理解或询问的消息。${followupModeHint}）`;
+        else if (scenario === 'user_hangup_during_call') hint = `（事实：通话中，${userDisplayName}在你说话或思考时突然挂断了。动作：结合人设与语境，自言自语或发一条消息表达反应（如惊讶、疑惑、无奈等）。${followupModeHint}）`;
 
         const fullHint = `（系统内部提示，不要输出这段内容本身：\n你是${charDisplayName}。\n${charNameLine}\n${userNameLine}\n${hint}\n规则：严禁混淆来电/去电与动作归属，不要把对方的拒接说成你的拒接，或把你的取消说成对方取消。只写消息正文，不写舞台指示。\n 要求：必须结合你的人设、与对方的关系和最近对话来措辞，称呼可根据亲密度。\n最近对话：\n${contextSnippet || '（无）'}\n不超过两句话。）`;
 
@@ -1185,6 +1192,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
         callSessionIdRef.current = sessionId;
         setCallSessionId(sessionId);
         setInternalCallDirection('user_outgoing');
+        callDirectionRef.current = 'user_outgoing';
         updateCallBubbles([]);
         setCallInput('');
         setCallInputMode('voice');
@@ -1192,6 +1200,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
         setCallElapsed(0);
         setCallMicMuted(true);
         setInternalCallState('dialing');
+        callStateRef.current = 'dialing';
         setGlobalShowCallOverlay(true);
         startRingtone('outgoing');
         const delay = 800 + Math.floor(Math.random() * 1600);
@@ -1203,12 +1212,15 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
                 callActiveRef.current = false;
                 setGlobalShowCallOverlay(false);
                 setInternalCallState('idle');
+                callStateRef.current = 'idle';
                 setInternalCallDirection(null);
+                callDirectionRef.current = null;
                 await saveCallLog('对方已拒绝', 'declined', sessionId);
                 await maybeSendAgentFollowup(sessionId, 'agent_decline');
                 return;
             }
             setInternalCallState('connected');
+            callStateRef.current = 'connected';
             const connectedAt = Date.now();
             updateCallStartedAt(connectedAt);
             setCallElapsed(0);
@@ -1228,6 +1240,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
         callSessionIdRef.current = sessionId;
         setCallSessionId(sessionId);
         setInternalCallDirection('agent_outgoing');
+        callDirectionRef.current = 'agent_outgoing';
         updateCallBubbles([]);
         setCallInput('');
         setCallInputMode('voice');
@@ -1235,6 +1248,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
         setCallElapsed(0);
         setCallMicMuted(true);
         setInternalCallState('ringing');
+        callStateRef.current = 'ringing';
         setGlobalShowCallOverlay(true);
         startRingtone('incoming');
         const ringTimeout = 12000 + Math.floor(Math.random() * 8000);
@@ -1252,6 +1266,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
         pendingReplyAfterAgentRef.current = false;
         callActiveRef.current = true;
         setInternalCallState('connected');
+        callStateRef.current = 'connected';
         const connectedAt = Date.now();
         updateCallStartedAt(connectedAt);
         setCallElapsed(0);
@@ -1261,9 +1276,9 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
 
     const hangup = useCallback(async () => {
         const wasActive = callActiveRef.current;
-        const stateAtHangup = callState;
+        const stateAtHangup = callStateRef.current;
         const sessionId = callSessionIdRef.current || callSessionId;
-        const directionAtHangup = callDirection;
+        const directionAtHangup = callDirectionRef.current;
         // 使用 ref 读取气泡和开始时间，不依赖 state
         const bubblesSnapshot = callBubblesRef.current;
         const startedAt = callStartedAtRef.current;
@@ -1289,7 +1304,9 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
         callVoiceRecorder.stopMonitoring();
         setGlobalShowCallOverlay(false);
         setInternalCallState('idle');
+        callStateRef.current = 'idle';
         setInternalCallDirection(null);
+        callDirectionRef.current = null;
         setCallMicMuted(true);
         callSessionIdRef.current = '';
         clearSuspendedCall();
@@ -1302,7 +1319,11 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
         } else {
             const scenarioMap: any = { agent_outgoing: 'user_cancel', user_outgoing: 'agent_cancel' };
             const scenario = stateAtHangup === 'ringing' ? 'user_decline' : (stateAtHangup === 'dialing' ? 'agent_decline' : (directionAtHangup ? scenarioMap[directionAtHangup] : 'agent_cancel'));
-            await saveCallLog('通话已结束', 'canceled', sessionId);
+            if (stateAtHangup === 'ringing' && directionAtHangup === 'agent_outgoing') {
+                await saveCallLog('用户已拒绝', 'declined', sessionId);
+            } else {
+                await saveCallLog('通话已结束', 'canceled', sessionId);
+            }
             await maybeSendAgentFollowup(sessionId, scenario);
         }
 

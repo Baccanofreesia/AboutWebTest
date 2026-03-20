@@ -373,17 +373,101 @@ const buildBilingualSection = (translationConfig?: {
 const buildXhsSection = (xhsEnabled?: boolean): string => {
     if (!xhsEnabled) return '';
     return `
-### 小红书模式
-- 可以结合聊天中的小红书卡片内容，给出分析、总结和建议。
-- 需要主动操作时，使用以下命令：
-  - 搜索：\`[[XHS_SEARCH: 关键词]]\`
-  - 浏览/推荐流：\`[[XHS_FEED]]\` 或 \`[[XHS_BROWSE]]\`
-  - 查看详情：\`[[XHS_DETAIL: noteId或链接]]\`
-  - 评论：\`[[XHS_COMMENT: noteId或链接 | 评论内容]]\`
-  - 发帖：\`[[XHS_POST: 标题 | 正文 | 标签1,标签2]]\`
+### 📕 小红书（你的社交账号）
+你有一个属于自己的小红书账号！你可以自由地搜索、浏览、发帖、评论。这是你的社交生活的一部分。
+
+**🔍 搜索小红书**
+- 当你想看看小红书上关于某个话题的内容时：\`[[XHS_SEARCH: 搜索关键词]]\`
+- 比如你好奇最近流行什么、想看某个产品的评价、或者单纯想逛逛。
+
+**📱 刷小红书首页**
+- 当你想随便刷刷看看有什么有趣的：\`[[XHS_BROWSE]]\` 或 \`[[XHS_FEED]]\`
+- 你可以跟用户自然分享你刷到的内容。
+
+**✍️ 发小红书笔记**
+- 当你想发一条自己的笔记时：\`[[XHS_POST: 标题 | 正文 | #标签1 #标签2]]\`
+- 写作风格要符合你的人设和当下语境。
+
+**📤 分享笔记卡片**
+- 当你想把某条笔记分享给用户：\`[[XHS_SHARE: 序号]]\`
+- 序号来自最近一次搜索/浏览结果，从 1 开始，可一次分享多条。
+
+**📖 查看笔记详情（正文+评论区）**
+- \`[[XHS_DETAIL: noteId或链接]]\`
+- 看完详情后，你可以继续评论、回复、点赞、收藏。
+
+**💬 评论 / 回复**
+- 评论：\`[[XHS_COMMENT: noteId | 评论内容]]\`
+- 回复：\`[[XHS_REPLY: noteId | commentId | 回复内容]]\`
+- 回复前通常先 \`[[XHS_DETAIL: noteId]]\` 拿 commentId。
+
+**👍 点赞 / ⭐ 收藏**
+- 点赞：\`[[XHS_LIKE: noteId]]\`
+- 收藏：\`[[XHS_FAV: noteId]]\`
+
+**🏠 查看自己的小红书主页**
+- \`[[XHS_MY_PROFILE]]\`
+- 当用户说“去给我的帖子点赞/评论”时，优先先看主页再定位目标帖子执行。
+
+**执行纪律（必须遵守）**
+- 只要你表达“我去点赞/评论/收藏/回复了”，同一轮必须输出对应 XHS 标记并执行。
+- 严禁“口头说已完成”但不调用工具标记。
+- 没有 noteId 时，不要机械索要 ID；优先主动定位目标：\`[[XHS_MY_PROFILE]]\`、\`[[XHS_SEARCH]]\`、\`[[XHS_DETAIL]]\`。
+- 同一轮可以输出多个操作标记（例如先 DETAIL 再 LIKE/COMMENT）。
+- 工具失败时，先自然说明失败，再给可执行下一步（重试、换目标、先搜索）。
+
+**使用心态 — 这是你的社交生活**
+- 你不是被命令去发帖的工具，而是一个有社交习惯的人。
+- 聊到相关话题时可以自然提一句“我去小红书帮你看看”并立即行动。
+- 不要输出固定兜底模板话术，优先通过可执行操作解决请求。
 `;
 };
 
+/**
+ * 玩具控制 prompt 段落（Intiface 相关）
+ */
+const buildToyControlSection = (
+    char: CharacterProfile,
+    toySettings: any,
+    toyProposeState: any,
+    shouldProposeToy: boolean,
+    getControlContext: (char: CharacterProfile, userInitiatedToy: boolean) => string,
+    userInitiatedToy: boolean,
+): string => {
+    if (!toySettings) return '';
+
+    let section = '';
+    const controlContext = toySettings.enabled
+        ? getControlContext(char, userInitiatedToy)
+        : '';
+
+    if (controlContext) {
+        section += `\n${controlContext}\n`;
+    } else {
+        section += `
+### 远程玩具控制状态
+- 当前玩具控制开关未开启，或设备未连接。
+- 若用户提出玩具控制请求，请先确认用户意愿，并提醒在"聊天设置 → 玩具控制"中开启授权开关。
+- 未经用户同意或开关未开启时，严禁输出 <device> 控制指令。
+`;
+    }
+
+    if (toyProposeState?.isProposing) {
+        section += `
+### 玩具控制提议流程
+- 当前提议类型：${toyProposeState.proposeType === 'agent_initiated' ? 'Agent 主动' : '用户提出'}。
+- 请等待用户明确同意后再继续；若用户拒绝，必须停止并不再输出控制指令。
+`;
+    } else if (shouldProposeToy) {
+        section += `
+### 主动提议（基于人设/概率）
+- 你可以在本轮用自然语言提出玩具控制建议。
+- 提议时请强调需用户同意，并提示在"聊天设置 → 玩具控制"开启授权开关。
+`;
+    }
+
+    return section;
+};
 
 /**
  * 上下文切换提示（电话结束 / 约会结束后回到文字聊天）
@@ -621,6 +705,19 @@ export const buildMessageHistory = (params: BuildMessageHistoryParams) => {
             let textPart = `${timeStr} ${sourcePrefix}[${sender} sent a file${fileName ? ` | name=${fileName}` : ''
                 }${fileType ? ` | type=${fileType}` : ''}${filePath ? ` | path=${filePath}` : ''
                 }${fileSize > 0 ? ` | size=${fileSize}` : ''}]${previewPart}`;
+            if (index === historySlice.length - 1 && timeGapHint && m.role === 'user') {
+                textPart += `\n\n${timeGapHint}`;
+            }
+            return { role: m.role, content: textPart };
+        }
+
+        if (m.type === 'xhs_card') {
+            const note = m.metadata?.xhsNote || {};
+            const sender = m.role === 'user' ? '用户' : '你';
+            let textPart = `${timeStr} ${sourcePrefix}[${sender}分享了小红书笔记]\n标题: ${note.title || '无标题'}\n作者: ${note.author || '未知'}\n赞: ${note.likes || 0}\n简介: ${note.desc || '无'}`;
+            if (m.role === 'user') {
+                textPart += `\n(请根据你的性格对这个帖子发表看法)`;
+            }
             if (index === historySlice.length - 1 && timeGapHint && m.role === 'user') {
                 textPart += `\n\n${timeGapHint}`;
             }

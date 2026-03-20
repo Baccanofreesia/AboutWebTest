@@ -29,6 +29,7 @@ const APP_DESCRIPTIONS: Record<string, string> = {
     'appearance': '外观 — 调整手机壁纸和界面外观',
     'study': '自习室 — 学习辅助工具',
     'freeroam': '自由活动 — 自由探索和活动',
+    'xhs_stock': '小红书图库 — 管理发布用的图片素材',
     'music': '音乐 — 音乐播放功能(开发中)',
     'browser': '浏览器 — 网页搜索(搜索能力已集成到Chat)',
     'settings': '设置 — API配置、感知配置、数据导入导出等系统设置',

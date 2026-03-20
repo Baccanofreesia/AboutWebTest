@@ -16,6 +16,7 @@ import JournalApp from '../apps/JournalApp';
 import ScheduleApp from '../apps/ScheduleApp';
 import StudyApp from '../apps/StudyApp';
 import XhsFreeRoamApp from '../apps/XhsFreeRoamApp';
+import XhsStockApp from '../apps/XhsStockApp';
 import MusicApp from '../apps/MusicApp';
 import BrowserApp from '../apps/BrowserApp';
 import { AppID } from '../types';
@@ -122,13 +123,13 @@ const formatCallDuration = (seconds: number) => {
 };
 
 const PhoneShell: React.FC = () => {
-  const { 
-    theme, isLocked, unlock, activeApp, closeApp, virtualTime, isDataLoaded, toasts, apiConfig, agent, 
+  const {
+    theme, isLocked, unlock, activeApp, closeApp, virtualTime, isDataLoaded, toasts, apiConfig, agent,
     suspendedCall, resumeCall,
     callState, callDirection, showCallOverlay, setShowCallOverlay, callBubbles, callElapsed, callActionsRef,
     callInput, callInputMode, callMicMuted, callMicActive, callVolumeLevel
   } = useOS();
-  
+
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [booting, setBooting] = useState(false);
   const [bootProgress, setBootProgress] = useState(0);
@@ -188,7 +189,7 @@ const PhoneShell: React.FC = () => {
     let intervalId: ReturnType<typeof setInterval> | null = null;
     let completeTimeout: ReturnType<typeof setTimeout> | null = null;
     let safetyTimeout: ReturnType<typeof setTimeout> | null = null;
-    
+
     const run = async () => {
       const useOverlay = false;
       if (useOverlay) {
@@ -352,6 +353,7 @@ const PhoneShell: React.FC = () => {
       case AppID.Schedule: return <ScheduleApp />;
       case AppID.Study: return <StudyApp />;
       case AppID.FreeRoam: return <XhsFreeRoamApp />;
+      case AppID.XhsStock: return <XhsStockApp />;
       case AppID.Music: return <MusicApp />;
       case AppID.Browser: return <BrowserApp />;
       case AppID.Launcher:

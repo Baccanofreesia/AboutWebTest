@@ -1,7 +1,7 @@
 
 
 
-import { AgentProfile, CharacterProfile, Message, ChatTheme, FullBackupData, GalleryImage, UserProfile, DiaryEntry, Task, Anniversary, CronJob, ImageDetail, RelationEvent, StickerUsageRecord } from '../types';
+import { AgentProfile, CharacterProfile, Message, ChatTheme, FullBackupData, GalleryImage, UserProfile, DiaryEntry, Task, Anniversary, CronJob, ImageDetail, RelationEvent, StickerUsageRecord, XhsStockImage, XhsActivityRecord } from '../types';
 
 const resolveDbEnv = (): string => {
     const env = (import.meta as any).env || {};
@@ -15,7 +15,7 @@ const resolveDbEnv = (): string => {
 
 const DB_NAME = `AetherOS_Data_${resolveDbEnv()}`;
 // CRITICAL FIX: Increment version to force `onupgradeneeded` on devices that have an old schema
-const DB_VERSION = 20;
+const DB_VERSION = 21;
 
 const STORE_CHARACTERS = 'characters';
 const STORE_MESSAGES = 'messages';
@@ -33,6 +33,8 @@ const STORE_WORKSPACE = 'workspace_files';
 const STORE_IMAGE_DETAILS = 'image_details';
 const STORE_RELATION_EVENTS = 'relation_events';
 const STORE_STICKER_USAGE = 'sticker_usage';
+const STORE_XHS_STOCK = 'xhs_stock';
+const STORE_XHS_ACTIVITIES = 'xhs_activities';
 
 // --- Workspace File Type ---
 export interface WorkspaceFile {
@@ -110,6 +112,11 @@ const openDB = (): Promise<IDBDatabase> => {
             createStore(STORE_IMAGE_DETAILS, { keyPath: 'id' });
             createStore(STORE_RELATION_EVENTS, { keyPath: 'id', autoIncrement: true });
             createStore(STORE_STICKER_USAGE, { keyPath: 'name' });
+            createStore(STORE_XHS_STOCK, { keyPath: 'id' });
+            if (!db.objectStoreNames.contains(STORE_XHS_ACTIVITIES)) {
+                const xhsActStore = db.createObjectStore(STORE_XHS_ACTIVITIES, { keyPath: 'id' });
+                xhsActStore.createIndex('characterId', 'characterId', { unique: false });
+            }
         };
     });
 };
@@ -652,6 +659,98 @@ export const DB = {
         }
     },
 
+    // --- XHS Stock Images ---
+    getXhsStockImages: async (): Promise<XhsStockImage[]> => {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(STORE_XHS_STOCK, 'readonly');
+            const request = transaction.objectStore(STORE_XHS_STOCK).getAll();
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    saveXhsStockImage: async (img: XhsStockImage): Promise<void> => {
+        const db = await openDB();
+        const transaction = db.transaction(STORE_XHS_STOCK, 'readwrite');
+        transaction.objectStore(STORE_XHS_STOCK).put(img);
+    },
+
+    deleteXhsStockImage: async (id: string): Promise<void> => {
+        const db = await openDB();
+        const transaction = db.transaction(STORE_XHS_STOCK, 'readwrite');
+        transaction.objectStore(STORE_XHS_STOCK).delete(id);
+    },
+
+    updateXhsStockImageUsage: async (id: string): Promise<void> => {
+        const db = await openDB();
+        const transaction = db.transaction(STORE_XHS_STOCK, 'readwrite');
+        const store = transaction.objectStore(STORE_XHS_STOCK);
+        return new Promise((resolve, reject) => {
+            const req = store.get(id);
+            req.onsuccess = () => {
+                const data = req.result as XhsStockImage;
+                if (data) {
+                    data.usedCount = (data.usedCount || 0) + 1;
+                    data.lastUsedAt = Date.now();
+                    store.put(data);
+                }
+                resolve();
+            };
+            req.onerror = () => reject(req.error);
+        });
+    },
+
+    // --- XHS Activities (Free Roam) ---
+    saveXhsActivity: async (activity: XhsActivityRecord): Promise<void> => {
+        const db = await openDB();
+        const transaction = db.transaction(STORE_XHS_ACTIVITIES, 'readwrite');
+        transaction.objectStore(STORE_XHS_ACTIVITIES).put(activity);
+    },
+
+    getXhsActivities: async (characterId: string, limit?: number): Promise<XhsActivityRecord[]> => {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(STORE_XHS_ACTIVITIES, 'readonly');
+            const store = transaction.objectStore(STORE_XHS_ACTIVITIES);
+            const index = store.index('characterId');
+            const request = index.getAll(IDBKeyRange.only(characterId));
+            request.onsuccess = () => {
+                let results = (request.result || []) as XhsActivityRecord[];
+                results.sort((a, b) => b.timestamp - a.timestamp);
+                if (limit) results = results.slice(0, limit);
+                resolve(results);
+            };
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    getAllXhsActivities: async (): Promise<XhsActivityRecord[]> => {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction(STORE_XHS_ACTIVITIES, 'readonly');
+            const request = transaction.objectStore(STORE_XHS_ACTIVITIES).getAll();
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    deleteXhsActivity: async (id: string): Promise<void> => {
+        const db = await openDB();
+        const transaction = db.transaction(STORE_XHS_ACTIVITIES, 'readwrite');
+        transaction.objectStore(STORE_XHS_ACTIVITIES).delete(id);
+    },
+
+    clearXhsActivities: async (characterId: string): Promise<void> => {
+        const activities = await DB.getXhsActivities(characterId);
+        const db = await openDB();
+        const transaction = db.transaction(STORE_XHS_ACTIVITIES, 'readwrite');
+        const store = transaction.objectStore(STORE_XHS_ACTIVITIES);
+        for (const a of activities) {
+            store.delete(a.id);
+        }
+    },
+
     // --- Bulk Export/Import ---
 
     exportFullData: async (): Promise<Partial<FullBackupData>> => {
@@ -671,7 +770,7 @@ export const DB = {
             });
         };
 
-        const [characters, messages, themes, emojis, assets, galleryImages, imageDetails, relationEvents, userProfiles, diaries, tasks, anniversaries, cronJobs] = await Promise.all([
+        const [characters, messages, themes, emojis, assets, galleryImages, imageDetails, relationEvents, userProfiles, diaries, tasks, anniversaries, cronJobs, xhsActivities, xhsStockImages] = await Promise.all([
             getAllFromStore(STORE_CHARACTERS),
             getAllFromStore(STORE_MESSAGES),
             getAllFromStore(STORE_THEMES),
@@ -685,6 +784,8 @@ export const DB = {
             getAllFromStore(STORE_TASKS),
             getAllFromStore(STORE_ANNIVERSARIES),
             getAllFromStore(STORE_CRON_JOBS),
+            getAllFromStore(STORE_XHS_ACTIVITIES),
+            getAllFromStore(STORE_XHS_STOCK),
         ]);
 
         const userProfile = userProfiles.length > 0 ? {
@@ -699,7 +800,8 @@ export const DB = {
         const novaAgent = characters.find((c: any) => c.id === 'nova') || characters[0];
         return {
             agentProfile: novaAgent || undefined,
-            messages, customThemes: themes, savedEmojis: emojis, galleryImages, imageDetails, relationEvents, userProfile, diaries, tasks, anniversaries, cronJobs
+            messages, customThemes: themes, savedEmojis: emojis, galleryImages, imageDetails, relationEvents, userProfile, diaries, tasks, anniversaries, cronJobs,
+            xhsActivities, xhsStockImages
         } as any;
     },
 
@@ -710,7 +812,8 @@ export const DB = {
         const availableStores = [
             STORE_CHARACTERS, STORE_MESSAGES, STORE_THEMES, STORE_EMOJIS,
             STORE_ASSETS, STORE_GALLERY, STORE_USER, STORE_DIARIES,
-            STORE_TASKS, STORE_ANNIVERSARIES, STORE_CRON_JOBS, STORE_IMAGE_DETAILS, STORE_RELATION_EVENTS
+            STORE_TASKS, STORE_ANNIVERSARIES, STORE_CRON_JOBS, STORE_IMAGE_DETAILS, STORE_RELATION_EVENTS,
+            STORE_XHS_ACTIVITIES, STORE_XHS_STOCK
         ].filter(name => db.objectStoreNames.contains(name));
 
         const tx = db.transaction(availableStores, 'readwrite');
@@ -744,6 +847,8 @@ export const DB = {
         if (data.tasks) clearAndAdd(STORE_TASKS, data.tasks);
         if (data.anniversaries) clearAndAdd(STORE_ANNIVERSARIES, data.anniversaries);
         if (data.cronJobs) clearAndAdd(STORE_CRON_JOBS, data.cronJobs);
+        if (data.xhsActivities) clearAndAdd(STORE_XHS_ACTIVITIES, data.xhsActivities);
+        if (data.xhsStockImages) clearAndAdd(STORE_XHS_STOCK, data.xhsStockImages);
 
         if (data.userProfile) {
             if (availableStores.includes(STORE_USER)) {
@@ -765,7 +870,7 @@ export const DB = {
         const db = await openDB();
         const transaction = db.transaction(STORE_STICKER_USAGE, 'readwrite');
         const store = transaction.objectStore(STORE_STICKER_USAGE);
-        
+
         return new Promise((resolve, reject) => {
             const req = store.get(name);
             req.onsuccess = () => {

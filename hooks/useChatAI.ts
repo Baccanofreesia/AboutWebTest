@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { CharacterProfile, UserProfile, Message, StickerUsageRecord } from '../types';
+import { useRef, useState } from 'react';
+import { CharacterProfile, UserProfile, Message, StickerUsageRecord, XhsMcpConfig } from '../types';
 import { DB } from '../utils/db';
 import { ContextBuilder } from '../utils/context';
 import { ChatParser } from '../utils/chatParser';
@@ -36,7 +36,7 @@ interface UseChatAIProps {
     translationConfig?: { enabled: boolean; sourceLang: string; targetLang: string };
     realtimeConfig?: any;
     xhsEnabled?: boolean;
-    xhsMcpConfig?: { enabled: boolean; serverUrl: string };
+    xhsMcpConfig?: XhsMcpConfig;
     sessionVoiceActive?: boolean;
     setVoiceEnergy: React.Dispatch<React.SetStateAction<number>>;
 }
@@ -62,8 +62,11 @@ export const useChatAI = ({
     const [isTyping, setIsTyping] = useState(false);
     const [recallStatus, setRecallStatus] = useState('');
     const [lastTokenUsage, setLastTokenUsage] = useState<number | null>(null);
-
-
+    const xsecTokenCacheRef = useRef<Map<string, string>>(new Map());
+    const noteTitleCacheRef = useRef<Map<string, string>>(new Map());
+    const commentUserIdCacheRef = useRef<Map<string, string>>(new Map());
+    const commentAuthorNameCacheRef = useRef<Map<string, string>>(new Map());
+    const commentParentIdCacheRef = useRef<Map<string, string>>(new Map());
     // ── 记忆调取：获取某月详细日志 ──
     const getDetailedLogsForMonth = (year: string, month: string) => {
         if (!char?.memories) return null;
@@ -169,7 +172,6 @@ export const useChatAI = ({
             if (workspaceRootPath) {
                 try {
                     stickerSets = await StickerParser.loadAllStickers(workspaceRootPath);
-                    const usageMap = await DB.getStickerUsageMap();
                     stickerIndex = StickerParser.buildStickerIndex(stickerSets, 4, 12);
 
                     const stickerQueryText = currentMsgs
@@ -182,7 +184,7 @@ export const useChatAI = ({
                         .join(' ');
 
                     const relevant = StickerParser.searchRelevantStickersWithCategory(
-                        stickerSets, stickerQueryText, 15, undefined, usageMap,
+                        stickerSets, stickerQueryText, 15, undefined, undefined,
                     );
                     stickerRelevantNames = Array.from(new Set(relevant.map(r => r.name))).slice(0, 15);
 
@@ -203,7 +205,7 @@ export const useChatAI = ({
                 if (!e?.name || !e?.url) continue;
                 if (!stickerUrlNameMap.has(e.url)) stickerUrlNameMap.set(e.url, e.name);
                 if (!stickerNameItemMap.has(e.name)) {
-                    stickerNameItemMap.set(e.name, { name: e.name, url: e.url, category: '自定义' });
+                    stickerNameItemMap.set(e.name, { name: e.name, url: e.url, category: '???' });
                 }
             }
 
@@ -511,131 +513,475 @@ export const useChatAI = ({
             // ── 小红书动作（XHS）──
             const xhsAvailable = !!(xhsEnabled && xhsMcpConfig?.enabled && xhsMcpConfig?.serverUrl);
             const xhsServerUrl = xhsMcpConfig?.serverUrl || '';
+            let lastXhsNotes: any[] = [];
 
-            const xhsSearchRegex = /\[\[XHS_SEARCH:\s*([\s\S]*?)\]\]/gi;
-            let xhsSearchMatch;
-            while ((xhsSearchMatch = xhsSearchRegex.exec(aiContent)) !== null) {
-                const keyword = xhsSearchMatch[1].trim();
-                if (!keyword) continue;
-                if (!xhsAvailable) {
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法搜索「${keyword}」]` });
-                    continue;
+            const buildNotesStr = (notes: any[]) =>
+                notes.map((n, i) =>
+                    `${i + 1}. [noteId=${n.noteId || n.id || ''}]「${n.title || '无标题'}」by ${n.author || '未知'} (${n.likes || 0}赞)\n   ${n.desc || ''}`
+                ).join('\n\n');
+
+            const extractNoteId = (rawToken: string) => {
+                const token = String(rawToken || '').trim();
+                if (!token) return '';
+                const pathMatch =
+                    token.match(/\/explore\/([a-zA-Z0-9]+)/i) ||
+                    token.match(/\/discovery\/item\/([a-zA-Z0-9]+)/i) ||
+                    token.match(/([a-fA-F0-9]{24})/);
+                if (pathMatch?.[1]) return pathMatch[1];
+                return token.split('?')[0];
+            };
+
+            const cacheXhsNotes = (notes: any[]) => {
+                for (const note of notes) {
+                    const noteId = extractNoteId(note?.noteId || note?.id || '');
+                    if (!noteId) continue;
+                    const token = note?.xsecToken || note?.xsec_token || note?.noteCard?.xsec_token;
+                    if (token) xsecTokenCacheRef.current.set(noteId, token);
+                    if (note?.title) noteTitleCacheRef.current.set(noteId, note.title);
                 }
-                try {
-                    const result = await XhsMcpClient.search(xhsServerUrl, keyword);
-                    const notes = extractNotesFromMcpData(result.data).map(normalizeNote).filter(n => n.noteId).slice(0, 3);
-                    if (notes.length === 0) {
-                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书搜索「${keyword}」暂无结果]` });
-                    } else {
-                        for (const note of notes) {
-                            await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'xhs_card', content: note.title || '小红书笔记', metadata: { xhsNote: note } });
-                        }
-                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 已返回 ${notes.length} 条小红书搜索结果]` });
+            };
+
+            const findXsecToken = (noteToken: string) => {
+                const noteId = extractNoteId(noteToken);
+                if (!noteId) return xhsMcpConfig?.userXsecToken || '';
+                const match = lastXhsNotes.find((n) => extractNoteId(n.noteId || n.id || '') === noteId);
+                const fromNotes = match?.xsecToken || match?.xsec_token || match?.noteCard?.xsec_token;
+                return fromNotes || xsecTokenCacheRef.current.get(noteId) || xhsMcpConfig?.userXsecToken || '';
+            };
+
+            const cacheCommentMetaFromDetail = (detailData: any) => {
+                const visited = new WeakSet<object>();
+                const walk = (node: any, parentId?: string) => {
+                    if (!node || typeof node !== 'object') return;
+                    if (Array.isArray(node)) {
+                        for (const item of node) walk(item, parentId);
+                        return;
                     }
-                } catch (e: any) {
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书搜索失败: ${e?.message || '未知错误'}]` });
-                }
-            }
-            aiContent = aiContent.replace(xhsSearchRegex, '').trim();
+                    if (visited.has(node)) return;
+                    visited.add(node);
 
-            const xhsFeedRegex = /\[\[XHS_(?:FEED|BROWSE)(?::[^\]]*)?\]\]/gi;
-            if (xhsFeedRegex.test(aiContent)) {
-                if (!xhsAvailable) {
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法获取推荐流]` });
-                } else {
+                    const commentId = String(node.comment_id || node.commentId || '').trim();
+                    const userId = String(node.user_id || node.userId || node.user?.user_id || node.user?.userId || '').trim();
+                    const authorName = String(node.nickname || node.user?.nickname || node.user?.name || '').trim();
+                    const currentParentId = String(node.parent_comment_id || node.parentCommentId || parentId || '').trim();
+                    if (commentId) {
+                        if (userId) commentUserIdCacheRef.current.set(commentId, userId);
+                        if (authorName) commentAuthorNameCacheRef.current.set(commentId, authorName);
+                        if (currentParentId && currentParentId !== commentId) {
+                            commentParentIdCacheRef.current.set(commentId, currentParentId);
+                        }
+                    }
+                    const nextParentId = commentId || parentId;
+                    for (const value of Object.values(node)) {
+                        if (value && typeof value === 'object') {
+                            walk(value, nextParentId);
+                        }
+                    }
+                };
+                walk(detailData);
+            };
+
+            const runXhsFollowup = async (cleaned: string, systemMsg: string) => {
+                const xhsMessages = [
+                    ...apiMessages_full,
+                    { role: 'assistant', content: cleaned },
+                    { role: 'user', content: systemMsg },
+                ];
+                const followup = cleanAiContent(
+                    await callLLM(resolved.chatUrl, headers, xhsMessages, 0.8, resolved.transformBody)
+                );
+                return followup || cleaned;
+            };
+
+            const waitMs = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+            const runXhsWithRetry = async (
+                task: () => Promise<{ success: boolean; error?: string }>,
+                retryDelays: number[],
+                shouldRetry?: (errorText: string) => boolean,
+            ) => {
+                let result = await task();
+                for (const delay of retryDelays) {
+                    if (result.success) break;
+                    const errorText = String(result.error || '');
+                    if (shouldRetry && !shouldRetry(errorText)) break;
+                    await waitMs(delay);
+                    result = await task();
+                }
+                return result;
+            };
+
+            const applyXhsActionTags = async (input: string, stageLabel: string) => {
+                let content = input;
+
+                const xhsShareMatches = content.matchAll(/\[\[XHS_SHARE:\s*(\d+)\]\]/g);
+                for (const shareMatch of xhsShareMatches) {
+                    const idx = parseInt(shareMatch[1], 10) - 1;
+                    if (idx >= 0 && idx < lastXhsNotes.length) {
+                        const note = lastXhsNotes[idx];
+                        await DB.saveMessage({
+                            charId: char.id,
+                            role: 'assistant',
+                            type: 'xhs_card',
+                            content: note.title || '小红书笔记',
+                            metadata: { xhsNote: note }
+                        });
+                    }
+                }
+                content = content.replace(/\[\[XHS_SHARE:\s*\d+\]\]/g, '').trim();
+
+                const xhsPostMatch = content.match(/\[\[XHS_POST:\s*(.+?)\]\]/s);
+                if (xhsPostMatch) {
+                    const postRaw = xhsPostMatch[1].trim();
+                    const parts = postRaw.split('|').map(p => p.trim());
+                    const title = parts[0] || '';
+                    const body = parts[1] || '';
+                    const tags = (parts[2] || '').match(/#(\S+)/g)?.map(t => t.replace('#', '')) || [];
+                    if (xhsAvailable && title && body) {
+                        try {
+                            const result = await XhsMcpClient.publishNote(xhsServerUrl, { title, content: body, tags });
+                            await DB.saveMessage({
+                                charId: char.id,
+                                role: 'system',
+                                type: 'text',
+                                content: result.success
+                                    ? `[系统: 小红书笔记发布成功]`
+                                    : `[系统: 小红书发帖失败: ${result.error || '未知错误'}]`,
+                            });
+                        } catch (e: any) {
+                            await DB.saveMessage({
+                                charId: char.id,
+                                role: 'system',
+                                type: 'text',
+                                content: `[系统: 小红书发帖失败: ${e?.message || '未知错误'}]`,
+                            });
+                        }
+                    }
+                    content = content.replace(/\[\[XHS_POST:.*?\]\]/gs, '').trim();
+                }
+
+                const xhsCommentMatch = content.match(/\[\[XHS_COMMENT:\s*(.+?)\]\]/);
+                if (xhsCommentMatch) {
+                    const parts = xhsCommentMatch[1].split('|').map(s => s.trim());
+                    const noteToken = parts[0];
+                    const commentText = parts.slice(1).join('|').trim();
+                    if (xhsAvailable && noteToken && commentText) {
+                        try {
+                            const noteId = extractNoteId(noteToken);
+                            const noteUrl = /^https?:\/\//i.test(noteToken)
+                                ? noteToken
+                                : `https://www.xiaohongshu.com/explore/${noteId}`;
+                            const result = await runXhsWithRetry(
+                                () => XhsMcpClient.comment(
+                                    xhsServerUrl,
+                                    noteUrl,
+                                    commentText,
+                                    findXsecToken(noteToken),
+                                ),
+                                [2200, 3500],
+                                (errorText) => !/参数|格式|invalid|forbidden|权限/i.test(errorText),
+                            );
+                            await DB.saveMessage({
+                                charId: char.id,
+                                role: 'system',
+                                type: 'text',
+                                content: result.success
+                                    ? `[系统: 小红书评论已发送]`
+                                    : `[系统: 小红书评论失败: ${result.error || '未知错误'}]`,
+                            });
+                        } catch (e: any) {
+                            await DB.saveMessage({
+                                charId: char.id,
+                                role: 'system',
+                                type: 'text',
+                                content: `[系统: 小红书评论失败: ${e?.message || '未知错误'}]`,
+                            });
+                        }
+                    }
+                    content = content.replace(/\[\[XHS_COMMENT:.*?\]\]/g, '').trim();
+                }
+
+                // REPLY 放在 LIKE/FAV 之前，避免工具侧页面状态切换导致回复定位失败
+                const xhsReplyMatch = content.match(/\[\[XHS_REPLY:\s*(.+?)\]\]/);
+                if (xhsReplyMatch) {
+                    const parts = xhsReplyMatch[1].split('|').map(s => s.trim());
+                    if (parts.length >= 3) {
+                        const [noteToken, commentId, ...replyParts] = parts;
+                        const replyContent = replyParts.join('|').trim();
+                        const noteId = extractNoteId(noteToken);
+                        const commentUserId = commentUserIdCacheRef.current.get(commentId);
+                        const commentAuthorName = commentAuthorNameCacheRef.current.get(commentId);
+                        const parentCommentId = commentParentIdCacheRef.current.get(commentId);
+                        if (xhsAvailable && noteId && commentId && replyContent) {
+                            try {
+                                let result = await XhsMcpClient.replyComment(
+                                    xhsServerUrl,
+                                    noteId,
+                                    findXsecToken(noteToken) || '',
+                                    replyContent,
+                                    commentId,
+                                    commentUserId,
+                                    parentCommentId,
+                                );
+                                const selectorBroken = !result.success && /未找到评论|comment.*not.*found/i.test(String(result.error || ''));
+                                if (!result.success && !selectorBroken) {
+                                    result = await runXhsWithRetry(
+                                        () => XhsMcpClient.replyComment(
+                                            xhsServerUrl,
+                                            noteId,
+                                            findXsecToken(noteToken) || '',
+                                            replyContent,
+                                            commentId,
+                                            commentUserId,
+                                            parentCommentId,
+                                        ),
+                                        [2500, 3500, 4500],
+                                        (errorText) => !/参数|格式|invalid/i.test(errorText),
+                                    );
+                                }
+                                if (!result.success) {
+                                    const fallbackContent = commentAuthorName
+                                        ? `@${commentAuthorName} ${replyContent}`
+                                        : replyContent;
+                                    const fallback = await runXhsWithRetry(
+                                        () => XhsMcpClient.comment(
+                                            xhsServerUrl,
+                                            `https://www.xiaohongshu.com/explore/${noteId}`,
+                                            fallbackContent,
+                                            findXsecToken(noteToken),
+                                        ),
+                                        [2200],
+                                        (errorText) => !/参数|格式|invalid/i.test(errorText),
+                                    );
+                                    if (fallback.success) {
+                                        result = { success: true };
+                                        await DB.saveMessage({
+                                            charId: char.id,
+                                            role: 'system',
+                                            type: 'text',
+                                            content: `[系统: 小红书回复失败，已降级为评论@回复]`,
+                                        });
+                                    }
+                                }
+                                await DB.saveMessage({
+                                    charId: char.id,
+                                    role: 'system',
+                                    type: 'text',
+                                    content: result.success
+                                        ? `[系统: 小红书回复已发送]`
+                                        : `[系统: 小红书回复失败(${stageLabel}): ${result.error || '未知错误'}]`,
+                                });
+                            } catch (e: any) {
+                                await DB.saveMessage({
+                                    charId: char.id,
+                                    role: 'system',
+                                    type: 'text',
+                                    content: `[系统: 小红书回复失败(${stageLabel}): ${e?.message || '未知错误'}]`,
+                                });
+                            }
+                        }
+                    }
+                    content = content.replace(/\[\[XHS_REPLY:.*?\]\]/g, '').trim();
+                }
+
+                const xhsLikeMatches = content.matchAll(/\[\[XHS_LIKE:\s*(.+?)\]\]/g);
+                for (const likeMatch of xhsLikeMatches) {
+                    const noteId = extractNoteId(likeMatch[1].trim());
+                    if (xhsAvailable && noteId) {
+                        try {
+                            await runXhsWithRetry(
+                                () => XhsMcpClient.likeFeed(xhsServerUrl, noteId, findXsecToken(noteId) || ''),
+                                [1800],
+                                (errorText) => !/参数|格式|invalid/i.test(errorText),
+                            );
+                        } catch { /* noop */ }
+                    }
+                }
+                content = content.replace(/\[\[XHS_LIKE:.*?\]\]/g, '').trim();
+
+                const xhsFavMatches = content.matchAll(/\[\[XHS_FAV:\s*(.+?)\]\]/g);
+                for (const favMatch of xhsFavMatches) {
+                    const noteId = extractNoteId(favMatch[1].trim());
+                    if (xhsAvailable && noteId) {
+                        try {
+                            await runXhsWithRetry(
+                                () => XhsMcpClient.favoriteFeed(xhsServerUrl, noteId, findXsecToken(noteId) || ''),
+                                [1800],
+                                (errorText) => !/参数|格式|invalid/i.test(errorText),
+                            );
+                        } catch { /* noop */ }
+                    }
+                }
+                content = content.replace(/\[\[XHS_FAV:.*?\]\]/g, '').trim();
+
+                return content;
+            };
+
+            const xhsSearchMatch = aiContent.match(/\[\[XHS_SEARCH:\s*([\s\S]*?)\]\]/);
+            if (xhsSearchMatch) {
+                const keyword = xhsSearchMatch[1].trim();
+                if (xhsAvailable && keyword) {
+                    try {
+                        const result = await XhsMcpClient.search(xhsServerUrl, keyword);
+                        const notes = extractNotesFromMcpData(result.data).map(normalizeNote).filter(n => n.noteId).slice(0, 6);
+                        lastXhsNotes = notes;
+                        cacheXhsNotes(notes);
+                        if (notes.length > 0) {
+                            const notesStr = buildNotesStr(notes);
+                            const cleaned = aiContent.replace(/\[\[XHS_SEARCH:.*?\]\]/g, '').trim() || '让我去小红书看看...';
+                            aiContent = await runXhsFollowup(cleaned, `[系统: 你在小红书搜索了"${keyword}"，以下是搜索结果]\n\n${notesStr}\n\n[系统: 你已经看完了搜索结果（注意：以上只是摘要，想看某条笔记的完整正文可以用 [[XHS_DETAIL: noteId]]）。现在请你：\n1. 自然地分享你看到的内容\n2. 如有需要可以用 [[XHS_SHARE: 序号]] 分享卡片\n3. 可以用 [[XHS_COMMENT]] / [[XHS_LIKE]] / [[XHS_FAV]] / [[XHS_DETAIL]]\n4. 严禁再输出[[XHS_SEARCH:...]]标记]`);
+                            await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 已返回 ${notes.length} 条小红书搜索结果]` });
+                        } else {
+                            await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书搜索「${keyword}」暂无结果]` });
+                        }
+                    } catch (e: any) {
+                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书搜索失败: ${e?.message || '未知错误'}]` });
+                    }
+                } else if (!xhsAvailable) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法搜索]` });
+                }
+                aiContent = aiContent.replace(/\[\[XHS_SEARCH:.*?\]\]/g, '').trim();
+            }
+
+            const xhsBrowseMatch = aiContent.match(/\[\[XHS_(?:FEED|BROWSE)(?::[^\]]*)?\]\]/);
+            if (xhsBrowseMatch) {
+                if (xhsAvailable) {
                     try {
                         const result = await XhsMcpClient.getRecommend(xhsServerUrl);
-                        const notes = extractNotesFromMcpData(result.data).map(normalizeNote).filter(n => n.noteId).slice(0, 3);
-                        if (notes.length === 0) {
-                            await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书推荐流暂无可展示内容]` });
-                        } else {
-                            for (const note of notes) {
-                                await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'xhs_card', content: note.title || '小红书推荐', metadata: { xhsNote: note } });
-                            }
+                        const notes = extractNotesFromMcpData(result.data).map(normalizeNote).filter(n => n.noteId).slice(0, 6);
+                        lastXhsNotes = notes;
+                        cacheXhsNotes(notes);
+                        if (notes.length > 0) {
+                            const notesStr = buildNotesStr(notes);
+                            const cleaned = aiContent.replace(/\[\[XHS_(?:FEED|BROWSE).*?\]\]/g, '').trim() || '让我刷刷小红书...';
+                            aiContent = await runXhsFollowup(cleaned, `[系统: 你刷了一会儿小红书首页，以下是你看到的内容]\n\n${notesStr}\n\n[系统: 你已经看完了（注意：以上只是摘要，想看某条笔记的完整正文可以用 [[XHS_DETAIL: noteId]]）。现在请你：\n1. 随意聊聊你看到的有趣内容\n2. 可用 [[XHS_SHARE: 序号]] 分享卡片\n3. 可用 [[XHS_POST]] / [[XHS_LIKE]] / [[XHS_FAV]] / [[XHS_DETAIL]]\n4. 严禁再输出[[XHS_BROWSE]]标记]`);
                         }
                     } catch (e: any) {
                         await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 获取小红书推荐失败: ${e?.message || '未知错误'}]` });
                     }
+                } else {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法获取推荐流]` });
                 }
-                aiContent = aiContent.replace(xhsFeedRegex, '').trim();
+                aiContent = aiContent.replace(/\[\[XHS_(?:FEED|BROWSE).*?\]\]/g, '').trim();
             }
 
-            const xhsDetailRegex = /\[\[XHS_DETAIL:\s*([\s\S]*?)\]\]/gi;
-            let xhsDetailMatch;
-            while ((xhsDetailMatch = xhsDetailRegex.exec(aiContent)) !== null) {
-                const token = xhsDetailMatch[1].trim();
-                if (!token) continue;
-                if (!xhsAvailable) {
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法查看详情]` });
-                    continue;
-                }
-                try {
-                    const noteUrl = /^https?:\/\//i.test(token) ? token : `https://www.xiaohongshu.com/explore/${token}`;
-                    const result = await XhsMcpClient.getNoteDetail(xhsServerUrl, noteUrl);
-                    if (result.success && result.data) {
-                        const note = normalizeNote(result.data);
-                        await DB.saveMessage({ charId: char.id, role: 'assistant', type: 'xhs_card', content: note.title || '小红书详情', metadata: { xhsNote: note } });
-                    } else {
-                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书详情获取失败]` });
+            aiContent = await applyXhsActionTags(aiContent, '首轮');
+
+            const xhsProfileMatch = aiContent.match(/\[\[XHS_MY_PROFILE\]\]/);
+            if (xhsProfileMatch) {
+                if (xhsAvailable) {
+                    const nickname = xhsMcpConfig?.loggedInNickname || '';
+                    const userId = xhsMcpConfig?.loggedInUserId || '';
+                    try {
+                        let profileInfo = '';
+                        let notes: any[] = [];
+                        if (userId) {
+                            const profileResult = await XhsMcpClient.getUserProfile(xhsServerUrl, userId, xhsMcpConfig?.userXsecToken);
+                            if (profileResult.success && profileResult.data) {
+                                profileInfo = typeof profileResult.data === 'string'
+                                    ? profileResult.data.slice(0, 2000)
+                                    : JSON.stringify(profileResult.data, null, 2).slice(0, 2000);
+                                notes = extractNotesFromMcpData(profileResult.data).map(normalizeNote).filter(n => n.noteId).slice(0, 6);
+                            }
+                        }
+                        if (!notes.length && nickname) {
+                            const searchResult = await XhsMcpClient.search(xhsServerUrl, nickname);
+                            notes = extractNotesFromMcpData(searchResult.data).map(normalizeNote).filter(n => n.noteId).slice(0, 6);
+                        }
+                        lastXhsNotes = notes;
+                        cacheXhsNotes(notes);
+                        const notesStr = notes.length ? buildNotesStr(notes) : '（没有找到相关笔记）';
+                        const cleaned = aiContent.replace(/\[\[XHS_MY_PROFILE\]\]/g, '').trim() || '让我看看我的小红书...';
+                        aiContent = await runXhsFollowup(cleaned, `[系统: 你打开了自己的小红书]\n昵称: ${nickname || '未知'}${userId ? ` (userId: ${userId})` : ''}\n\n主页信息:\n${profileInfo || '（主页信息暂不可用）'}\n\n你的笔记:\n${notesStr}\n\n[系统: 你已经看完了主页。可以用 [[XHS_DETAIL]] 查看详情，或 [[XHS_POST]] 发新帖。严禁再输出[[XHS_MY_PROFILE]]标记]`);
+                    } catch (e: any) {
+                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书主页加载失败: ${e?.message || '未知错误'}]` });
                     }
-                } catch (e: any) {
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书详情失败: ${e?.message || '未知错误'}]` });
+                } else {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法查看主页]` });
                 }
+                aiContent = aiContent.replace(/\[\[XHS_MY_PROFILE\]\]/g, '').trim();
             }
-            aiContent = aiContent.replace(xhsDetailRegex, '').trim();
 
-            const xhsCommentRegex = /\[\[XHS_COMMENT:\s*([\s\S]*?)\|([\s\S]*?)\]\]/gi;
-            let xhsCommentMatch;
-            while ((xhsCommentMatch = xhsCommentRegex.exec(aiContent)) !== null) {
-                const noteToken = xhsCommentMatch[1].trim();
-                const content = xhsCommentMatch[2].trim();
-                if (!noteToken || !content) continue;
-                if (!xhsAvailable) {
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法评论]` });
-                    continue;
+            const xhsDetailMatch = aiContent.match(/\[\[XHS_DETAIL:\s*(.+?)\]\]/);
+            if (xhsDetailMatch) {
+                const noteToken = xhsDetailMatch[1].trim();
+                if (xhsAvailable && noteToken) {
+                    try {
+                        const noteId = extractNoteId(noteToken);
+                        const noteUrl = /^https?:\/\//i.test(noteToken) ? noteToken : `https://www.xiaohongshu.com/explore/${noteId}`;
+                        let result = await XhsMcpClient.getNoteDetail(
+                            xhsServerUrl,
+                            noteUrl,
+                            findXsecToken(noteToken),
+                            { loadAllComments: true },
+                        );
+                        if ((!result.success || !result.data) && noteId) {
+                            const cachedTitle = noteTitleCacheRef.current.get(noteId);
+                            if (cachedTitle) {
+                                const refreshResult = await XhsMcpClient.search(xhsServerUrl, cachedTitle);
+                                const refreshed = extractNotesFromMcpData(refreshResult.data)
+                                    .map(normalizeNote)
+                                    .filter(n => n.noteId);
+                                if (refreshed.length > 0) {
+                                    cacheXhsNotes(refreshed);
+                                    result = await XhsMcpClient.getNoteDetail(
+                                        xhsServerUrl,
+                                        noteUrl,
+                                        findXsecToken(noteId),
+                                        { loadAllComments: true },
+                                    );
+                                }
+                            }
+                        }
+                        if (result.success && result.data) {
+                            const note = normalizeNote(result.data);
+                            if (note.noteId) {
+                                lastXhsNotes = [note, ...lastXhsNotes.filter(n => n.noteId !== note.noteId)].slice(0, 10);
+                                cacheXhsNotes([note]);
+                            }
+                            if (noteId) {
+                                const detailToken =
+                                    (result.data as any)?.xsecToken ||
+                                    (result.data as any)?.xsec_token ||
+                                    (result.data as any)?.noteCard?.xsec_token;
+                                if (detailToken) {
+                                    xsecTokenCacheRef.current.set(noteId, detailToken);
+                                }
+                            }
+                            cacheCommentMetaFromDetail(result.data);
+                            const detailStr = typeof result.data === 'string'
+                                ? result.data.slice(0, 2000)
+                                : JSON.stringify(result.data, null, 2).slice(0, 2000);
+                            const cleaned = aiContent.replace(/\[\[XHS_DETAIL:.*?\]\]/g, '').trim() || '让我看看这条笔记...';
+                            aiContent = await runXhsFollowup(
+                                cleaned,
+                                `[系统: 你点开了一条小红书笔记的详情页（noteId=${noteId || '未知'}）]\n\n${detailStr}\n\n[系统: 你已经看完了完整内容和评论区。现在请你：\n1. 自然地分享你看到的内容\n2. 如需评论请用 [[XHS_COMMENT: ${noteId || 'noteId'} | 评论内容]]\n3. 如需回复评论请用 [[XHS_REPLY: ${noteId || 'noteId'} | commentId | 回复内容]]\n4. 如需点赞/收藏请用 [[XHS_LIKE: ${noteId || 'noteId'}]] / [[XHS_FAV: ${noteId || 'noteId'}]]\n5. 严禁口头声称“已点赞/已评论”却不输出对应工具标记]`,
+                            );
+                        } else {
+                            await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书详情获取失败]` });
+                            const cleaned = aiContent.replace(/\[\[XHS_DETAIL:.*?\]\]/g, '').trim() || '这条笔记好像打不开...';
+                            aiContent = await runXhsFollowup(
+                                cleaned,
+                                `[系统: 你尝试打开小红书笔记（noteId=${noteId || '未知'}）但加载失败了]\n\n[系统: 现在请你：\n1. 自然告诉用户这条笔记当前打不开/加载失败\n2. 可以建议先搜索相关关键词再试：[[XHS_SEARCH: 关键词]]\n3. 或先从主页重新定位：[[XHS_MY_PROFILE]]\n4. 严禁再输出[[XHS_DETAIL:...]]标记]`,
+                            );
+                        }
+                    } catch (e: any) {
+                        await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书详情失败: ${e?.message || '未知错误'}]` });
+                        const cleaned = aiContent.replace(/\[\[XHS_DETAIL:.*?\]\]/g, '').trim() || '这条笔记好像打不开...';
+                        aiContent = await runXhsFollowup(
+                            cleaned,
+                            `[系统: 你尝试打开小红书笔记时发生异常：${e?.message || '未知错误'}]\n\n[系统: 请自然说明失败，并给出下一步可执行建议（例如重新搜索、稍后重试）。严禁再输出[[XHS_DETAIL:...]]标记]`,
+                        );
+                    }
+                } else if (!xhsAvailable) {
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法查看详情]` });
                 }
-                try {
-                    const noteUrl = /^https?:\/\//i.test(noteToken) ? noteToken : `https://www.xiaohongshu.com/explore/${noteToken}`;
-                    const result = await XhsMcpClient.comment(xhsServerUrl, noteUrl, content);
-                    await DB.saveMessage({
-                        charId: char.id,
-                        role: 'system',
-                        type: 'text',
-                        content: result.success ? `[系统: 小红书评论已发送]` : `[系统: 小红书评论失败: ${result.error || '未知错误'}]`,
-                    });
-                } catch (e: any) {
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书评论失败: ${e?.message || '未知错误'}]` });
-                }
+                aiContent = aiContent.replace(/\[\[XHS_DETAIL:.*?\]\]/g, '').trim();
             }
-            aiContent = aiContent.replace(xhsCommentRegex, '').trim();
 
-            const xhsPostRegex = /\[\[XHS_POST:\s*([\s\S]*?)\|([\s\S]*?)\|?([\s\S]*?)\]\]/gi;
-            let xhsPostMatch;
-            while ((xhsPostMatch = xhsPostRegex.exec(aiContent)) !== null) {
-                const title = xhsPostMatch[1].trim();
-                const content = xhsPostMatch[2].trim();
-                const tagsRaw = (xhsPostMatch[3] || '').trim();
-                const tags = tagsRaw ? tagsRaw.split(/[，,]/).map(t => t.trim().replace(/^#/, '')).filter(Boolean) : [];
-                if (!title || !content) continue;
-                if (!xhsAvailable) {
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法发帖]` });
-                    continue;
-                }
-                try {
-                    const result = await XhsMcpClient.publishNote(xhsServerUrl, { title, content, tags });
-                    await DB.saveMessage({
-                        charId: char.id,
-                        role: 'system',
-                        type: 'text',
-                        content: result.success ? `[系统: 小红书笔记发布成功]` : `[系统: 小红书发帖失败: ${result.error || '未知错误'}]`,
-                    });
-                } catch (e: any) {
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书发帖失败: ${e?.message || '未知错误'}]` });
-                }
-            }
-            aiContent = aiContent.replace(xhsPostRegex, '').trim();
+            // detail/profile 二次改写后，可能再次产生 XHS 操作标记，需再执行一轮
+            aiContent = await applyXhsActionTags(aiContent, '二轮');
 
-            // ── ChatParser 动作解析 ──
             const parseResult = await ChatParser.parseAndExecuteActions(aiContent, char, addToast, apiConfig);
 
             // 语音能量扣除
@@ -646,19 +992,16 @@ export const useChatAI = ({
 
             aiContent = ChatParser.sanitize(parseResult.content);
             const hasToolResult = parseResult.hasToolResult;
-
-            // ── sticker 解析工具 ──
             const resolveStickerByName = (name: string): StickerItem | null => {
                 const trimmed = String(name || '').trim();
                 if (!trimmed) return null;
                 const mapped = stickerNameItemMap.get(trimmed);
                 if (mapped) return mapped;
                 const found = emojis.find(e => e.name === trimmed);
-                if (found?.url) return { name: found.name, url: found.url, category: '自定义' };
+                if (found?.url) return { name: found.name, url: found.url, category: 'custom' };
                 return null;
             };
 
-            // SEND_EMOJI_FROM 解析
             const emojiFromRegex = /\[\[SEND_EMOJI_FROM:\s*([^|\]]+)\|([^\]]+)\]\]/gi;
             if (emojiFromRegex.test(aiContent)) {
                 aiContent = aiContent.replace(emojiFromRegex, (_, rawCategory, rawKeyword) => {

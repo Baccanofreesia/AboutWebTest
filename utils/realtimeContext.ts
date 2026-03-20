@@ -54,7 +54,7 @@ export interface RealtimeConfig {
 
     // 小红书配置 (MCP)
     xhsEnabled?: boolean;
-    xhsMcpConfig?: { enabled: boolean; serverUrl: string; loggedInNickname?: string; loggedInUserId?: string };
+    xhsMcpConfig?: { enabled: boolean; serverUrl: string; loggedInNickname?: string; loggedInUserId?: string; userXsecToken?: string };
 
     // 缓存配置
     cacheMinutes: number;   // 缓存时长（分钟）
@@ -82,7 +82,7 @@ export const defaultRealtimeConfig: RealtimeConfig = {
     notionApiKey: '',
     notionDatabaseId: '',
     xhsEnabled: false,
-    xhsMcpConfig: { enabled: false, serverUrl: 'http://localhost:18060/mcp', loggedInNickname: '', loggedInUserId: '' },
+    xhsMcpConfig: { enabled: false, serverUrl: 'http://localhost:18060/mcp', loggedInNickname: '', loggedInUserId: '', userXsecToken: '' },
     cacheMinutes: 30,
     perceptionConfig: {
         visibilityThreshold: 0.7,      // 默认较高阈值，保持沉默

@@ -511,29 +511,60 @@ const MessageItem = React.memo(({
         );
     }
 
-    if (m.type === 'xhs_card') {
-        const note = m.metadata?.xhsNote || {};
-        const noteUrl = note.noteId ? `https://www.xiaohongshu.com/explore/${note.noteId}` : '';
+    if (m.type === 'xhs_card' && m.metadata?.xhsNote) {
+        const note = m.metadata.xhsNote;
         return commonLayout(
-            <div className="w-72 bg-white rounded-2xl border border-red-100 p-3 shadow-sm">
-                {note.coverUrl && <img src={note.coverUrl} className="w-full h-36 rounded-xl object-cover mb-2" />}
-                <div className="text-sm font-bold text-slate-800 line-clamp-2">{note.title || m.content || '小红书笔记'}</div>
-                <div className="text-[11px] text-slate-500 mt-1 line-clamp-2">{note.desc || '点击查看详情'}</div>
-                <div className="flex items-center justify-between mt-2 text-[10px] text-slate-400">
-                    <span>@{note.author || '未知作者'}</span>
-                    <span>❤️ {note.likes || 0}</span>
-                </div>
-                {!!noteUrl && (
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            window.open(noteUrl, '_blank');
-                        }}
-                        className="mt-3 w-full py-2 bg-red-50 text-red-500 rounded-xl text-xs font-bold"
-                    >
-                        打开小红书
-                    </button>
+            <div className="w-64 bg-white rounded-xl overflow-hidden shadow-sm border border-slate-100 cursor-pointer active:opacity-90 transition-opacity">
+                {note.coverUrl ? (
+                    <div className="relative w-full h-36 bg-slate-100 overflow-hidden">
+                        <img
+                            src={note.coverUrl}
+                            alt=""
+                            className="w-full h-full object-cover"
+                            loading="lazy"
+                            referrerPolicy="no-referrer"
+                            crossOrigin="anonymous"
+                            onError={(e: any) => {
+                                const img = e.target;
+                                const container = img.parentElement;
+                                if (!container) return;
+                                img.style.display = 'none';
+                                if (container.querySelector('.xhs-cover-fallback')) return;
+                                const fallback = document.createElement('div');
+                                fallback.className = 'xhs-cover-fallback w-full h-full bg-gradient-to-br from-red-50 to-pink-100 flex items-center justify-center';
+                                fallback.innerHTML = `<div class="text-center"><div class="text-2xl mb-1">📕</div><div class="text-[10px] text-red-300 font-medium">${note.title ? '封面加载失败' : '小红书笔记'}</div></div>`;
+                                container.appendChild(fallback);
+                            }}
+                        />
+                        {note.type === 'video' && (
+                            <div className="absolute top-2 right-2 bg-black/50 rounded-full px-1.5 py-0.5 flex items-center gap-0.5">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 text-white"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" /></svg>
+                                <span className="text-[9px] text-white font-medium">视频</span>
+                            </div>
+                        )}
+                    </div>
+                ) : (
+                    <div className="h-14 bg-gradient-to-r from-red-400 to-pink-500 flex items-center justify-center">
+                        <span className="text-white/80 text-xs font-medium tracking-wide">小红书笔记</span>
+                    </div>
                 )}
+                <div className="p-3">
+                    <div className="font-bold text-sm text-slate-800 line-clamp-2 leading-snug mb-1.5">{note.title || '无标题笔记'}</div>
+                    {note.desc && <p className="text-xs text-slate-500 line-clamp-3 leading-relaxed mb-2">{note.desc}</p>}
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-50">
+                        <div className="flex items-center gap-1.5">
+                            <div className="w-4 h-4 rounded-full bg-gradient-to-br from-red-400 to-pink-400 flex items-center justify-center text-[8px] text-white font-bold">{(note.author || '?')[0]}</div>
+                            <span className="text-[10px] text-slate-500 truncate max-w-[100px]">{note.author || '小红书用户'}</span>
+                        </div>
+                        <div className="flex items-center gap-1 text-[10px] text-slate-400">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 text-red-300"><path d="m9.653 16.915-.005-.003-.019-.01a20.759 20.759 0 0 1-1.162-.682 22.045 22.045 0 0 1-2.582-1.9C4.045 12.733 2 10.352 2 7.5a4.5 4.5 0 0 1 8-2.828A4.5 4.5 0 0 1 18 7.5c0 2.852-2.044 5.233-3.885 6.82a22.049 22.049 0 0 1-3.744 2.582l-.019.01-.005.003h-.002a.723.723 0 0 1-.692 0l-.003-.002Z" /></svg>
+                            <span>{note.likes || 0}</span>
+                        </div>
+                    </div>
+                    <div className="mt-2 pt-1.5 flex items-center gap-1 text-[9px] text-slate-300">
+                        <span className="text-red-400 font-bold">小红书</span> <span>·</span> <span>{note.type === 'video' ? '视频' : '笔记'}{isUser ? '分享' : '推荐'}</span>
+                    </div>
+                </div>
             </div>
         );
     }
@@ -575,6 +606,34 @@ const MessageItem = React.memo(({
     const containerStyle: React.CSSProperties = { backgroundColor: styleConfig.backgroundColor, opacity: styleConfig.opacity, ...borderObj };
 
     const renderContent = (text: string) => {
+        const renderTextWithLinks = (segment: string, keyPrefix: string) => {
+            const urls = segment.match(URL_REGEX) || [];
+            if (urls.length === 0) return [segment];
+            const parts = segment.split(URL_REGEX);
+            const nodes: React.ReactNode[] = [];
+            parts.forEach((part, i) => {
+                if (part) nodes.push(<span key={`${keyPrefix}-t-${i}`}>{part}</span>);
+                const url = urls[i];
+                if (url) {
+                    nodes.push(
+                        <a
+                            key={`${keyPrefix}-u-${i}`}
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline underline-offset-2 text-blue-500 hover:text-blue-600"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                            }}
+                        >
+                            {url}
+                        </a>
+                    );
+                }
+            });
+            return nodes;
+        };
+
         const parts = text.split(/(```[\s\S]*?```)/g);
         return parts.map((part, index) => {
             if (part.startsWith('```') && part.endsWith('```')) {
@@ -589,7 +648,12 @@ const MessageItem = React.memo(({
                     return <div key={key} className="my-1 pl-2.5 border-l-[3px] border-current opacity-70 italic text-[13px]">{quoteText}</div>;
                 }
                 const boldSegments = line.split(/(\*\*.*?\*\*)/g);
-                const renderedLine = boldSegments.map((seg, i) => seg.startsWith('**') && seg.endsWith('**') ? <strong key={i} className="font-bold">{seg.slice(2, -2)}</strong> : seg);
+                const renderedLine = boldSegments.flatMap((seg, i) => {
+                    if (seg.startsWith('**') && seg.endsWith('**')) {
+                        return <strong key={`${key}-b-${i}`} className="font-bold">{seg.slice(2, -2)}</strong>;
+                    }
+                    return renderTextWithLinks(seg, `${key}-l-${i}`);
+                });
                 return <div key={key} className="min-h-[1.2em]">{renderedLine}</div>;
             });
         });
@@ -614,14 +678,14 @@ const MessageItem = React.memo(({
     const langAContent = hasBilingual ? stripJunk(rawContent.substring(0, bilingualIdx)) : stripJunk(rawContent);
     const langBContent = hasBilingual ? stripJunk(rawContent.substring(bilingualIdx + '%%BILINGUAL%%'.length)) : '';
     let displayContent = (isShowingTarget && langBContent) ? langBContent : langAContent;
- 
+
     // ✅ Handle call interruption: truncate text if interrupted mid-speech
     const isInterrupted = m.metadata?.interrupted === true;
     const spokenCharCount = m.metadata?.spokenCharCount;
     if (isInterrupted && typeof spokenCharCount === 'number' && displayContent.length > spokenCharCount) {
         displayContent = displayContent.slice(0, spokenCharCount) + '...';
     }
- 
+
     const hasVoiceTag = /<[语語]音>[\s\S]*?<\/[语語]音>/.test(rawContent);
     // Auto fallback textual UI indication for unrendered voice tags
     if (hasVoiceTag && !displayContent) {

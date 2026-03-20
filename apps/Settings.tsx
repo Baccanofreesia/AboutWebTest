@@ -421,6 +421,7 @@ const Settings: React.FC = () => {
                 serverUrl: rtXhsMcpUrl,
                 loggedInNickname: rtXhsNickname || undefined,
                 loggedInUserId: rtXhsUserId || undefined,
+                userXsecToken: realtimeConfig.xhsMcpConfig?.userXsecToken,
             },
             perceptionConfig: {
                 visibilityThreshold: rtVisibilityThreshold,
@@ -478,8 +479,9 @@ const Settings: React.FC = () => {
             const result = await XhsMcpClient.testConnection(rtXhsMcpUrl);
             if (result.connected) {
                 const toolCount = result.tools?.length || 0;
+                const tokenInfo = result.xsecToken ? ' | xsecToken 已获取' : '';
                 const loginInfo = result.loggedIn
-                    ? ` | 已登录 ${result.nickname || ''}`
+                    ? ` | 已登录 ${result.nickname || ''}${tokenInfo}`
                     : ' | ⚠️ 未登录，请先在浏览器中登录小红书';
                 notifyTestToast(`✅ 小红书 MCP 连接成功：${toolCount} 个工具可用${loginInfo}`, 'success');
                 if (result.nickname && !rtXhsNickname) setRtXhsNickname(result.nickname);
@@ -492,6 +494,7 @@ const Settings: React.FC = () => {
                         serverUrl: rtXhsMcpUrl,
                         loggedInNickname: rtXhsNickname || result.nickname,
                         loggedInUserId: rtXhsUserId || result.userId,
+                        userXsecToken: result.xsecToken || realtimeConfig.xhsMcpConfig?.userXsecToken,
                     }
                 });
             } else { notifyTestToast(`❌ 小红书 MCP 连接失败：${result.error}`, 'error'); }

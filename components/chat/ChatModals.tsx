@@ -33,6 +33,8 @@ interface ChatModalsProps {
     translateTargetLang: string;
     onSetTranslateSourceLang: (lang: string) => void;
     onSetTranslateLang: (lang: string) => void;
+    xhsEnabled?: boolean;
+    onToggleXhs?: () => void;
     onTransfer: () => void;
     onImportEmoji: () => void;
     onSaveSettings: () => void;
@@ -66,6 +68,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     selectedMessage, selectedEmoji, activeCharacter, allHistoryMessages = [],
     chatVoiceEnabled, onToggleChatVoice, chatVoiceLang, onSetChatVoiceLang,
     translationEnabled, onToggleTranslation, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
+    xhsEnabled, onToggleXhs,
     onTransfer, onImportEmoji, onSaveSettings, onBgUpload, onRemoveBg, onClearHistory,
     onSetHistoryStart, onEnterSelectionMode, onReplyMessage, onEditMessageStart, onConfirmEditMessage, onDeleteMessage, onCopyMessage, onDeleteEmoji, onFavoriteSticker,
     chatWaitTime, onSetChatWaitTime, replySplitInterval, onSetReplySplitInterval
@@ -73,19 +76,6 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     const bgInputRef = useRef<HTMLInputElement>(null);
     const [historyPage, setHistoryPage] = useState(0);
     const HISTORY_PAGE_SIZE = 50;
-<<<<<<< Updated upstream
-    const {
-        isEnabled, setIsEnabled,
-        isConnected, isConnecting, error,
-        serverAddress, setServerAddress,
-        connect, disconnect, scan, stopAll,
-        devices, settings: toySettings,
-        updateControlSettings,
-        proposeState, respondToPropose,
-        startSession, endSession
-    } = useIntiface();
-=======
->>>>>>> Stashed changes
 
     return (
         <>
@@ -159,7 +149,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                             <div className="mt-3">
                                 <label className="text-[10px] font-bold text-slate-400 mb-1.5 block">语音语种</label>
                                 <div className="flex flex-wrap gap-1.5">
-                                    {[{v:'',l:'默认'},{v:'en',l:'English'},{v:'ja',l:'日本語'},{v:'ko',l:'한국어'},{v:'fr',l:'Français'},{v:'es',l:'Español'}].map(opt => (
+                                    {[{ v: '', l: '默认' }, { v: 'en', l: 'English' }, { v: 'ja', l: '日本語' }, { v: 'ko', l: '한국어' }, { v: 'fr', l: 'Français' }, { v: 'es', l: 'Español' }].map(opt => (
                                         <button key={opt.v} onClick={() => onSetChatVoiceLang?.(opt.v)}
                                             className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all ${chatVoiceLang === opt.v ? 'bg-primary text-white' : 'bg-slate-100 text-slate-500'}`}>
                                             {opt.l}
@@ -178,8 +168,8 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                             </div>
                         </div>
                         <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
-                             开启后，AI 消息自动翻译为「选」的语言显示，点「译」切换到目标语言。
-                         </p>
+                            开启后，AI 消息自动翻译为「选」的语言显示，点「译」切换到目标语言。
+                        </p>
                         {translationEnabled && (
                             <div className="mt-3 space-y-3">
                                 <div>
@@ -202,158 +192,21 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                         )}
                     </div>
                     <div className="pt-2 border-t border-slate-100">
+                        <div className="flex justify-between items-center cursor-pointer" onClick={() => onToggleXhs?.()}>
+                            <label className="text-xs font-bold text-slate-400 uppercase pointer-events-none">小红书</label>
+                            <div className={`w-10 h-6 rounded-full p-1 transition-colors flex items-center ${xhsEnabled ? 'bg-red-400' : 'bg-slate-200'}`}>
+                                <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${xhsEnabled ? 'translate-x-4' : ''}`}></div>
+                            </div>
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
+                            开启后，角色在聊天中可以搜索、浏览、发帖、评论小红书。需要在全局设置中配置 MCP 或 Cookie。
+                        </p>
+                    </div>
+                    <div className="pt-2 border-t border-slate-100">
                         <button onClick={() => setModalType('history-manager')} className="w-full py-3 bg-slate-50 text-slate-600 font-bold rounded-2xl border border-slate-200 active:scale-95 transition-transform flex items-center justify-center gap-2">
                             管理上下文 / 隐藏历史
                         </button>
                         <p className="text-[10px] text-slate-400 mt-2 text-center">可选择从某条消息开始显示，隐藏之前的记录（不被 AI 读取）。</p>
-                    </div>
-                    <div className="pt-2 border-t border-slate-100">
-<<<<<<< Updated upstream
-                        <label className="text-xs font-bold text-slate-400 uppercase mb-3 block">玩具控制 (Intiface)</label>
-
-                        <div className="flex justify-between items-center cursor-pointer" onClick={() => setIsEnabled(!isEnabled)}>
-                            <label className="text-xs font-bold text-slate-400 uppercase pointer-events-none">启用设备连接</label>
-                            <div className={`w-10 h-6 rounded-full p-1 transition-colors flex items-center ${isEnabled ? 'bg-primary' : 'bg-slate-200'}`}>
-                                <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${isEnabled ? 'translate-x-4' : ''}`}></div>
-                            </div>
-                        </div>
-                        <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">开启后可连接 Intiface Central (Buttplug)。</p>
-
-                        {isEnabled && (
-                            <div className="mt-3 space-y-3">
-                                <div className="space-y-2">
-                                    <label className="text-[10px] font-bold text-slate-400 mb-1.5 block">服务器地址 (WebSocket)</label>
-                                    <div className="flex gap-2">
-                                        <input
-                                            type="text"
-                                            value={serverAddress}
-                                            onChange={(e) => setServerAddress(e.target.value)}
-                                            disabled={isConnected}
-                                            className="flex-1 bg-slate-100 rounded-xl px-3 py-2 text-xs font-mono text-slate-700 border border-slate-200"
-                                            placeholder="ws://127.0.0.1:12345"
-                                        />
-                                        <button
-                                            onClick={() => (isConnected ? disconnect() : connect(serverAddress))}
-                                            disabled={isConnecting}
-                                            className={`px-3 py-2 rounded-xl text-xs font-bold ${isConnected ? 'bg-red-500 text-white' : 'bg-primary text-white'} ${isConnecting ? 'opacity-60' : ''}`}
-                                        >
-                                            {isConnecting ? '连接中' : isConnected ? '断开' : '连接'}
-                                        </button>
-                                    </div>
-                                    {error && <div className="text-[10px] text-red-500">{error}</div>}
-                                </div>
-
-                                <div className="flex items-center justify-between text-[10px] text-slate-500">
-                                    <span>设备数：{devices.length}</span>
-                                    <div className="flex gap-2">
-                                        <button onClick={scan} className="px-2 py-1 rounded-lg bg-slate-100 text-slate-600">扫描</button>
-                                        <button onClick={stopAll} className="px-2 py-1 rounded-lg bg-yellow-100 text-yellow-700">停止所有</button>
-                                    </div>
-                                </div>
-
-                                <div className="flex justify-between items-center cursor-pointer" onClick={() => updateControlSettings({ enabled: !toySettings.enabled })}>
-                                    <label className="text-xs font-bold text-slate-400 uppercase pointer-events-none">允许 AI 控制</label>
-                                    <div className={`w-10 h-6 rounded-full p-1 transition-colors flex items-center ${toySettings.enabled ? 'bg-primary' : 'bg-slate-200'}`}>
-                                        <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${toySettings.enabled ? 'translate-x-4' : ''}`}></div>
-                                    </div>
-                                </div>
-                                <p className="text-[10px] text-slate-400">该开关是最终授权（用户一票否决）。</p>
-
-                                <div className="flex justify-between items-center cursor-pointer" onClick={() => updateControlSettings({ userVetoEnabled: !toySettings.userVetoEnabled })}>
-                                    <label className="text-xs font-bold text-slate-400 uppercase pointer-events-none">用户一票否决</label>
-                                    <div className={`w-10 h-6 rounded-full p-1 transition-colors flex items-center ${toySettings.userVetoEnabled ? 'bg-primary' : 'bg-slate-200'}`}>
-                                        <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${toySettings.userVetoEnabled ? 'translate-x-4' : ''}`}></div>
-                                    </div>
-                                </div>
-
-                                <div className="flex justify-between items-center cursor-pointer" onClick={() => updateControlSettings({ agentProactiveEnabled: !toySettings.agentProactiveEnabled })}>
-                                    <label className="text-xs font-bold text-slate-400 uppercase pointer-events-none">允许 Agent 主动提议</label>
-                                    <div className={`w-10 h-6 rounded-full p-1 transition-colors flex items-center ${toySettings.agentProactiveEnabled ? 'bg-primary' : 'bg-slate-200'}`}>
-                                        <div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${toySettings.agentProactiveEnabled ? 'translate-x-4' : ''}`}></div>
-                                    </div>
-                                </div>
-
-                                <div className="space-y-2">
-                                    <label className="text-[10px] font-bold text-slate-400 mb-1.5 block">控制模式</label>
-                                    <select
-                                        value={toySettings.mode}
-                                        onChange={(e) => updateControlSettings({ mode: e.target.value as any })}
-                                        className="w-full bg-slate-100 rounded-xl px-3 py-2 text-xs text-slate-700 border border-slate-200"
-                                    >
-                                        <option value="manual">手动（需明确指令）</option>
-                                        <option value="mixed">混合（建议+确认）</option>
-                                        <option value="auto">自动（可自主决定）</option>
-                                    </select>
-                                </div>
-
-                                <div className="space-y-2">
-                                    <label className="text-[10px] font-bold text-slate-400 mb-1.5 block">强度上限 ({toySettings.maxIntensity}%)</label>
-                                    <input
-                                        type="range"
-                                        min="10"
-                                        max="100"
-                                        step="5"
-                                        value={toySettings.maxIntensity}
-                                        onChange={(e) => updateControlSettings({ maxIntensity: parseInt(e.target.value) })}
-                                        className="w-full h-2 bg-slate-200 rounded-full appearance-none accent-primary"
-                                    />
-                                </div>
-
-                                <div className="flex gap-2">
-                                    <button
-                                        onClick={() => updateControlSettings({ allowGradient: !toySettings.allowGradient })}
-                                        className={`flex-1 py-2 rounded-xl text-xs font-bold ${toySettings.allowGradient ? 'bg-primary/10 text-primary' : 'bg-slate-100 text-slate-500'}`}
-                                    >
-                                        允许渐变
-                                    </button>
-                                    <button
-                                        onClick={() => updateControlSettings({ allowPattern: !toySettings.allowPattern })}
-                                        className={`flex-1 py-2 rounded-xl text-xs font-bold ${toySettings.allowPattern ? 'bg-primary/10 text-primary' : 'bg-slate-100 text-slate-500'}`}
-                                    >
-                                        允许模式
-                                    </button>
-                                </div>
-
-                                <div className="space-y-2">
-                                    <label className="text-[10px] font-bold text-slate-400 mb-1.5 block">安全词</label>
-                                    <input
-                                        type="text"
-                                        value={toySettings.safeWord || ''}
-                                        onChange={(e) => updateControlSettings({ safeWord: e.target.value.trim() })}
-                                        className="w-full bg-slate-100 rounded-xl px-3 py-2 text-xs text-slate-700 border border-slate-200"
-                                        placeholder="停止"
-                                    />
-                                </div>
-
-                                {proposeState.isProposing && (
-                                    <div className="bg-slate-50 rounded-xl p-3 text-xs text-slate-600 border border-slate-200 space-y-2">
-                                        <div className="font-bold text-slate-700">控制提议中</div>
-                                        <div>类型：{proposeState.proposeType === 'agent_initiated' ? 'Agent 主动' : '用户提出'}</div>
-                                        <div className="flex gap-2">
-                                            <button onClick={() => respondToPropose(true)} className="flex-1 py-2 rounded-lg bg-primary text-white font-bold">同意</button>
-                                            <button onClick={() => respondToPropose(false)} className="flex-1 py-2 rounded-lg bg-slate-200 text-slate-600 font-bold">拒绝</button>
-                                        </div>
-                                    </div>
-                                )}
-
-                                <div className="flex gap-2">
-                                    <button onClick={startSession} className="flex-1 py-2 rounded-xl bg-slate-100 text-slate-600 text-xs font-bold">开始会话</button>
-                                    <button onClick={endSession} className="flex-1 py-2 rounded-xl bg-red-50 text-red-500 text-xs font-bold">结束会话</button>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                    <div className="pt-2 border-t border-slate-100">
-=======
->>>>>>> Stashed changes
-                        <label className="text-xs font-bold text-red-400 uppercase mb-3 block">危险区域 (Danger Zone)</label>
-                        <div className="flex items-center gap-2 mb-3 cursor-pointer" onClick={() => setPreserveContext(!preserveContext)}>
-                            <div className={`w-5 h-5 rounded-full border flex items-center justify-center transition-colors ${preserveContext ? 'bg-primary border-primary' : 'bg-slate-100 border-slate-300'}`}>
-                                {preserveContext && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
-                            </div>
-                            <span className="text-sm text-slate-600">清空时保留最后10条记录 (维持语境)</span>
-                        </div>
-                        <button onClick={onClearHistory} className="w-full py-3 bg-red-50 text-red-500 font-bold rounded-2xl border border-red-100 active:scale-95 transition-transform flex items-center justify-center gap-2">执行清空</button>
                     </div>
                 </div>
             </Modal>

@@ -21,7 +21,7 @@ export const ChatParser = {
         try {
             const cleanedText = cleanTextForTts(text);
             if (!cleanedText) return false;
-            
+
             const audioBlob = await synthesizeSpeech(cleanedText, char, apiConfig);
             const base64 = await new Promise<string>((resolve, reject) => {
                 const reader = new FileReader();
@@ -40,9 +40,9 @@ export const ChatParser = {
             if (apiConfig.nativeWorkspacePath) {
                 try {
                     await fsBridge.createFolder(apiConfig.nativeWorkspacePath, relativeDir, !!apiConfig.securityPolicy?.allowGlobalFileAccess);
-                } catch (e) {}
+                } catch (e) { }
                 await fsBridge.writeFileBase64(apiConfig.nativeWorkspacePath, relativePath, base64, !!apiConfig.securityPolicy?.allowGlobalFileAccess);
-                
+
                 await DB.saveMessage({
                     charId: char.id,
                     role: 'assistant',
@@ -211,7 +211,7 @@ export const ChatParser = {
             if (galleryEntriesCache) return galleryEntriesCache;
             const rootItems = await fsBridge.readDir(galleryRootPath, '/', galleryAllowGlobal);
             const rootFiles = rootItems
-            .filter(i => i.type === 'file' && isMediaName(i.name))
+                .filter(i => i.type === 'file' && isMediaName(i.name))
                 .map(i => ({ name: i.name, path: `/${i.name}` }));
             const folders = rootItems.filter(i => i.type === 'folder');
             const nested = await Promise.all(folders.map(async f => {
@@ -850,6 +850,7 @@ export const ChatParser = {
             .replace(/\(\d{1,2}:\d{2}\s*[AP]M\)/gi, '')
             // Strip markdown headers (# ## ### etc) → keep the text
             .replace(/^#{1,6}\s+/gm, '')
+            .replace(/^\s*\[(?:通话|电话|語音|语音|聊天|call|voice)\][\s:：-]*/gmi, '')
             // Strip residual action/system tags that weren't caught earlier
             .replace(/<fs_write\s+target="[^"]+">[\s\S]*?<\/fs_write>/gi, '')
             .replace(/<fs_(?:ls|read|delete|execute)\s+(?:dir|file)="[^"]+"\s*\/>/gi, '')
