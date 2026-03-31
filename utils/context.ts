@@ -91,6 +91,16 @@ export const ContextBuilder = {
             }
         }
 
+        // ─── L3 Recent Summaries (daily/weekly/monthly blurb) ───
+        if (char.l3SummaryBlurb) {
+            context += char.l3SummaryBlurb + '\n\n';
+        }
+
+        // ─── L4 Active Observations (profiles/ buffer, pending promotion) ───
+        if (char.profilesBlurb) {
+            context += char.profilesBlurb + '\n\n';
+        }
+
         // ─── L2: Refined Monthly Core Memory Bank ───
         context += `### 记忆系统 (L2 Memory Bank)\n`;
         let memoryContent = "";

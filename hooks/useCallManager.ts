@@ -16,7 +16,7 @@ import { cleanTextForTts, synthesizeSpeech } from '../utils/ttsService';
 import { transcribeWithByteDance, transcribeWithByteDanceFile, transcribeWithFasterWhisper } from '../utils/asrService';
 import { resolveApiEndpoint } from '../utils/apiResolver';
 
-const AGENT_CALL_COOLDOWN_MS = 8 * 60 * 1000;
+const AGENT_CALL_COOLDOWN_MS = 25 * 60 * 1000;
 const DEFAULT_CALL_PAUSE_THRESHOLD = 800;
 const DEFAULT_CALL_SEGMENT_DURATION = 12000;
 const CALL_PAUSE_MIN = 200;
@@ -195,7 +195,14 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
             role: 'system',
             type: 'text',
             content,
-            metadata: { source: 'call-log', variant, callSessionId: sessionOverride || callSessionIdRef.current || callSessionId }
+            metadata: {
+                source: 'call-log',
+                variant,
+                // Who called whom: 'user_outgoing' = user dialled agent, 'agent_outgoing' = agent dialled user
+                direction: callDirectionRef.current ?? null,
+                initiator: callDirectionRef.current === 'user_outgoing' ? 'user' : callDirectionRef.current === 'agent_outgoing' ? 'agent' : null,
+                callSessionId: sessionOverride || callSessionIdRef.current || callSessionId,
+            }
         });
     }, [char, callSessionId]);
 
@@ -228,8 +235,10 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
                 turnCount: Math.max(1, turnCount),
                 characterName: charDisplayName,
                 characterAvatar: charDisplayAvatar,
+                direction: callDirectionRef.current ?? null,
+                initiator: callDirectionRef.current === 'user_outgoing' ? 'user' : callDirectionRef.current === 'agent_outgoing' ? 'agent' : null,
                 keepsakeLine,
-                callSessionId: callSessionIdRef.current || callSessionId
+                callSessionId: callSessionIdRef.current || callSessionId,
             }
         });
     }, [char, charDisplayName, charDisplayAvatar, buildCallKeepsakeLine, callSessionId]);
@@ -295,7 +304,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
 
     const pauseThresholdMs = clampNumber(apiConfig?.callPauseThreshold, CALL_PAUSE_MIN, CALL_PAUSE_MAX, DEFAULT_CALL_PAUSE_THRESHOLD);
     const segmentDurationMs = clampNumber(apiConfig?.callSegmentDuration, CALL_SEGMENT_MIN, CALL_SEGMENT_MAX, DEFAULT_CALL_SEGMENT_DURATION);
-    const webSpeechMinDb = clampNumber(apiConfig?.webSpeechMinVolume, WEB_SPEECH_MIN_DB, WEB_SPEECH_MAX_DB, -30);
+    const webSpeechMinDb = clampNumber(apiConfig?.webSpeechMinVolume, WEB_SPEECH_MIN_DB, WEB_SPEECH_MAX_DB, -45);
     const webSpeechConfigRef = useRef({
         language: apiConfig?.webSpeechLanguage || 'zh-CN',
         interim: apiConfig?.webSpeechInterim ?? true,
@@ -306,7 +315,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
     });
 
     useEffect(() => {
-        const minDb = clampNumber(apiConfig?.webSpeechMinVolume, WEB_SPEECH_MIN_DB, WEB_SPEECH_MAX_DB, -30);
+        const minDb = clampNumber(apiConfig?.webSpeechMinVolume, WEB_SPEECH_MIN_DB, WEB_SPEECH_MAX_DB, -45);
         webSpeechConfigRef.current = {
             language: apiConfig?.webSpeechLanguage || 'zh-CN',
             interim: apiConfig?.webSpeechInterim ?? true,
@@ -548,23 +557,26 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
             void saveCallInternalLog('[CallDecision] skip: callInitiative<=0');
             return false;
         }
-        let score = 0.08;
+        let score = 0;
         const signals: string[] = [];
-        if (/(打电话|电话|语音|通话|听你|打给你|直接聊|直接说)/i.test(trimmed)) score += 0.55;
-        if (/(很急|马上|现在|快点|有急事|立刻)/i.test(trimmed)) score += 0.2;
-        if (/(难过|焦虑|崩溃|孤独|想你|委屈|失眠)/i.test(trimmed)) score += 0.12;
-        if (trimmed.length >= 120) score += 0.1;
-        if (/(打电话|电话|语音|通话|听你|打给你|直接聊|直接说)/i.test(trimmed)) signals.push('phone_intent');
-        if (/(很急|马上|现在|快点|有急事|立刻)/i.test(trimmed)) signals.push('urgency');
-        if (/(难过|焦虑|崩溃|孤独|想你|委屈|失眠)/i.test(trimmed)) signals.push('emotion');
-        if (trimmed.length >= 120) signals.push('long_text');
+        // Only strong phone-intent keywords; removed overly broad '直接聊|直接说'
+        if (/(打电话|电话|语音|通话|打给你)/i.test(trimmed)) { score += 0.45; signals.push('phone_intent'); }
+        if (/(很急|马上|有急事|立刻)/i.test(trimmed)) { score += 0.15; signals.push('urgency'); }
+        // Emotion keywords are common in companion apps — lower weight, only strong signals
+        if (/(崩溃|孤独|失眠)/i.test(trimmed)) { score += 0.06; signals.push('emotion'); }
+        if (trimmed.length >= 120) { score += 0.03; signals.push('long_text'); }
+        // No signals → no call. Eliminates the old base chance on every message.
+        if (signals.length === 0) {
+            void saveCallInternalLog('[CallDecision] skip: no_signals');
+            return false;
+        }
         const hour = new Date().getHours();
         if (hour >= 23 || hour <= 7) {
-            score -= 0.12;
+            score -= 0.15;
             signals.push('late_hour');
         }
-        const scaled = score * (0.4 + callInitiative * 1.2);
-        const threshold = Math.min(Math.max(scaled, 0.02), 0.8);
+        const scaled = score * (0.15 + callInitiative * 0.7);
+        const threshold = Math.min(Math.max(scaled, 0.02), 0.45);
         const roll = Math.random();
         const decision = roll < threshold;
         void saveCallInternalLog(`[CallDecision] decision=${decision} score=${score.toFixed(3)} scaled=${scaled.toFixed(3)} threshold=${threshold.toFixed(3)} roll=${roll.toFixed(3)} signals=${signals.join(',') || 'none'}`);
@@ -945,9 +957,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
             };
             recognizer.onresult = (event: any) => {
                 if (!callActiveRef.current || callStateRef.current === 'idle' || callMicMutedRef.current) return;
-                if (callVolumeLevelRef.current < (webSpeechConfigRef.current.minVolumeLinear || 0)) {
-                    return;
-                }
+                // removed volume check
                 markUserSpoke();
                 let interimText = '';
                 let finalText = '';
@@ -1183,6 +1193,9 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
     // --- Core Actions ---
     const startCall = useCallback(async () => {
         if (!char || callState !== 'idle') return;
+        if (!canUseCallTts()) {
+            addToast('未配置语音服务（MiniMax），当前为文字模式通话', 'info');
+        }
         pendingReplyAfterAgentRef.current = false;
         stopCallAudio();
         clearSuspendedCall();
@@ -1227,10 +1240,12 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
             // FIX 4: 接通时不写聊天界面气泡，只在挂断后写摘要卡片
             scheduleAgentGreeting(connectedAt);
         }, delay);
-    }, [char, callState, stopCallAudio, clearSuspendedCall, setGlobalShowCallOverlay, startRingtone, stopRingtone, decideCallAccept, saveCallLog, maybeSendAgentFollowup, scheduleAgentGreeting, updateCallBubbles, updateCallStartedAt]);
+    }, [char, callState, stopCallAudio, clearSuspendedCall, setGlobalShowCallOverlay, startRingtone, stopRingtone, decideCallAccept, saveCallLog, maybeSendAgentFollowup, scheduleAgentGreeting, updateCallBubbles, updateCallStartedAt, canUseCallTts, addToast]);
 
     const startAgentCall = useCallback(async () => {
         if (!char || callState !== 'idle') return;
+        // Agent should not auto-call when TTS is unavailable (text-only call is awkward)
+        if (!canUseCallTts()) return;
         pendingReplyAfterAgentRef.current = false;
         stopCallAudio();
         clearSuspendedCall();
@@ -1257,7 +1272,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
             if (callSessionIdRef.current !== sessionId) return;
             await hangup();
         }, ringTimeout);
-    }, [char, callState, stopCallAudio, clearSuspendedCall, setGlobalShowCallOverlay, startRingtone]);
+    }, [char, callState, stopCallAudio, clearSuspendedCall, setGlobalShowCallOverlay, startRingtone, canUseCallTts]);
 
     const acceptIncomingCall = useCallback(async () => {
         if (!char || callDirection !== 'agent_outgoing' || callState !== 'ringing') return;
@@ -1366,7 +1381,9 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
     useEffect(() => {
         if (apiConfig?.callAsrProvider === 'web-speech') {
             stopCallVoiceCapture(false);
-            callVoiceRecorder.cancelRecording();
+            if (callMicActive) {
+                callVoiceRecorder.stopRecording();
+            }
             if (!callActiveRef.current || callState === 'idle' || callMicMuted) {
                 stopWebSpeechRecognition(true);
                 callVoiceRecorder.stopMonitoring();
@@ -1391,7 +1408,7 @@ export const useCallManager = ({ char, messages, setMessages, triggerAI }: UseCa
         } else {
             startCallVoiceCapture();
         }
-    }, [callState, callMicMuted, apiConfig?.callAsrProvider, callVoiceRecorder, addToast, startCallVoiceCapture, stopCallVoiceCapture, startWebSpeechRecognition, stopWebSpeechRecognition]);
+    }, [callState, callMicMuted, callMicActive, apiConfig?.callAsrProvider, addToast, startCallVoiceCapture, stopCallVoiceCapture, startWebSpeechRecognition, stopWebSpeechRecognition]);
 
     useEffect(() => {
         if (apiConfig?.callAsrProvider === 'web-speech') {

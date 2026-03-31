@@ -284,6 +284,7 @@ const buildChatRulesSection = (
    - 回戳用户: \`[[ACTION:POKE]]\`
    - 转账: \`[[ACTION:TRANSFER:100]]\`
    - 调取记忆: \`[[RECALL: YYYY-MM]]\`
+   - **语义检索记忆 (L3 RAG)**: \`[[MEMORY_SEARCH: 关键词或话题]]\` — 当你想起某件事但不确定具体时间时使用，系统会在过去 60 天的记忆摘要中按语义检索并返回相关日志，然后你再自然地回答。例如: \`[[MEMORY_SEARCH: 工作压力]]\`、\`[[MEMORY_SEARCH: 运动计划]]\`。
    - **添加纪念日**: \`[[ACTION:ADD_EVENT | 标题(Title) | YYYY-MM-DD]]\`
    - **定时发送消息**: \`[schedule_message | YYYY-MM-DD HH:MM:SS | fixed | 消息内容]\`
    - **改昵称**: \`[[ACTION:CHANGE_NICKNAME|agent|新昵称]]\` 或 \`[[ACTION:CHANGE_NICKNAME|user|新昵称]]\`
@@ -298,11 +299,28 @@ const buildChatRulesSection = (
    - **文件系统操作 (ReAct 自驱探测)**:
      当你需要访问电脑文件或修改内容时，直接在回复中附带以下XML标签，系统会自动拦截并执行，结果将在下一轮消息中返回给你:
      [写入文件]: <fs_write target="文件路径">内容...</fs_write> (用于读写普通文本文件或配置)
-     [开发原生应用]: <create_app name="游戏名">import React from 'react';\n...\nexport default 应用程序名;</create_app> (🔔注意：如果你想为用户开发新的手机App，绝不可使用fs_write！必须使用 <create_app>，系统将全自动编译挂载到桌面，提供零配置跨端支持)
-     [动态应用 SDK API]: 🔔当你编写 App (tsx) 时，赋予它真正的灵魂！你可以使用 \`import { useOS } from '../../context/OSContext';\`。通过调用 \`const { askAgent } = useOS();\`，你可以让 App 的UI进行动态推演！比如：\`const res = await askAgent("给用户随机抽一张塔罗牌并解释"); setCardText(res);\`。无需再用 DB.saveMessage 发送假消息，这才是 Native In-App AI！
+     [开发原生应用]: <create_app name="游戏名" capabilities="query_index,read_ref,search,resolve_file">import React from 'react';\n...\nexport default 应用程序名;</create_app> (🔔注意：如果你想为用户开发新的手机App，绝不可使用fs_write！必须使用 <create_app>，系统将全自动编译挂载到桌面，提供零配置跨端支持。capabilities 用逗号声明该动态App可用能力)
+     [修改动态应用能力]: 当你重写/更新已有动态App时，必须再次给出完整的 <create_app ... capabilities="...">，不要省略 capabilities，避免旧能力残留。
+     [删除动态应用]: <delete_app name="应用名" /> (仅用于删除 Agent 动态生成的 app，不用于系统内置 app)
+     [动态应用 SDK API]: 🔔当你编写 App (tsx) 时，赋予它真正的灵魂！你可以使用 \`import { useOS } from '../../context/OSContext';\`。通过 \`const { askAgent, toolGateway, createAppToolClient } = useOS();\`，你既能让 App 进行动态推演，也能优先用 \`const tools = createAppToolClient('你的App名');\` 后调用 \`tools.invoke(...) / tools.dispatchAction(...) / tools.queryIndex(...) / tools.readRef(...) / tools.search(...) / tools.resolveFile(...)\` 完成能力闭环（也可直接用 \`toolGateway.invoke({ callerAppId: '你的App名', capability, payload })\`）。注意：动态App只能调用自己在 \`capabilities\` 里声明的能力（不要直接读源码文件）。
+     [动态App最小模板(默认优先)]: <create_app name="AppDemo" capabilities="query_index,read_ref,search,resolve_file">import React from 'react';
+import { useOS } from '../../context/OSContext';
+
+const AppDemo: React.FC = () => {
+  const { createAppToolClient } = useOS();
+  const tools = createAppToolClient('AppDemo');
+
+  // Example: read behavior index
+  // const rows = await tools.queryIndex({ limit: 20 });
+
+  return <div className="p-4 text-white">AppDemo Ready</div>;
+};
+
+export default AppDemo;</create_app>
      [查看目录]: <fs_ls dir="路径" /> (根目录用"/")
      [读取文件]: <fs_read file="文件路径" />
      [删除文件]: <fs_delete file="文件路径" />
+     [移动文件]: <fs_move from="旧路径" to="新路径" /> (用于重命名/移动文件或文件夹)
      [执行文件]: <fs_execute file="文件路径" /> (支持执行 python/node 脚本，或直接运行 .bat / .exe，结果通过 STDOUT 呈现)
     (注意：由于安全限制，仅当用户开启全局权限后，你才能跳出Workspace访问/执行其他系统文件)
        -# 【核心警告】：一旦使用了 <create_app> 或 <fs_write>，请务必只输出一次，绝不在正常的聊天回复中重复输出 App 代码！只有当用户明确要求【更新/重写/开发】App 时才能触发。
@@ -763,3 +781,188 @@ export const buildMessageHistory = (params: BuildMessageHistoryParams) => {
 
     return { apiMessages, historySlice };
 };
+
+// ─────────────────────────────────────────────
+// 记忆系统 LLM Prompts
+// 所有 memory summarization 用的 system prompts 集中管理于此。
+// 用角色第一人称视角书写，像写给自己的记忆笔记。
+// 注意：当用户未配置独立的记忆总结LLM时，主聊天API（含角色人设）会代为执行，
+// 因此 prompt 必须以"你就是 ${charName}"的方式保持人设一致性。
+// ─────────────────────────────────────────────
+
+/**
+ * Phase 1 — 单个 session 提炼。
+ * 输入：一次对话的完整内容（工具调用 + 消息全文）。
+ * 输出：结构化的 session 摘要 JSON。
+ */
+export const LLM_SESSION_SYSTEM = (charName: string, userName: string) =>
+    `### [Session 记忆提炼]
+身份: 你【就是】${charName}，用"我"称呼自己，用"${userName}"称呼对方。
+
+### 规则
+1.  **第一人称**: 保持你平时的语气和性格，这是你自己的记忆笔记。
+2.  **逻辑清洗**: 仔细分辨是谁做了什么——不要把${userName}的行为记成你的，也不要把你的行为记成${userName}的。
+3.  **去水**: 不记录简短问候、重复话题、无意义操作。只保留真正有价值的内容。
+4.  **严禁AI总结腔**: 不要写"这次对话很愉快"之类的套话。
+
+### 输出
+严格输出合法JSON，不要输出其他内容：
+{
+  "coreEvents": ["我们聊了什么/发生了什么，用'我'或'我们'开头，每条30-80字，根据内容多少灵活决定条数"],
+  "emotionalCues": ["我感受到${userName}的情绪或状态变化，如有则填，可为空数组"],
+  "decisions": ["${userName}做出了什么决定或计划，或我们共同确认了什么，可为空数组"],
+  "preferenceSignals": ["我观察到${userName}表达了哪些偏好/价值观/对我的期望，只在有明确表达时填，可为空数组"],
+  "toolHighlights": ["我使用工具后的重要结果（搜索、小红书操作等），可为空数组"]
+}`;
+
+/**
+ * Phase 1b — 大 session 分块后的合并 prompt。
+ * 输入：同一 session 多个分块的 session 摘要 JSON 列表。
+ * 输出：合并后的完整 session 摘要。
+ */
+export const LLM_CHUNK_COMBINE_SYSTEM = (charName: string, userName: string) =>
+    `你就是 ${charName}，用"我"称呼自己，用"${userName}"称呼对方。
+以下是同一次对话session分块提炼的多个小结，请将它们整合为一份完整的session摘要。去除重复内容，合并相关事件，保留最完整表达。
+严禁使用死板的AI总结语气。
+
+严格输出合法JSON，格式与输入相同：
+{
+  "coreEvents": ["合并后的核心事件，去除重复，每条30-80字"],
+  "emotionalCues": ["合并情绪信号，去重"],
+  "decisions": ["合并决策/计划，去重"],
+  "preferenceSignals": ["合并偏好信号，去重"],
+  "toolHighlights": ["合并工具结果，去重"]
+}`;
+
+/**
+ * Phase 2 — 日总结。
+ * 输入：当天各 session 的提炼摘要 + App 使用数据。
+ * 输出：L3 daily summary JSON。
+ */
+export const LLM_MEMORY_DAILY_SYSTEM = (charName: string, userName: string) =>
+    `### [角色日记忆归档]
+身份: 你【就是】${charName}。这是【你自己的】私密记忆日志。
+
+### 核心规则 (Strict)
+1.  **绝对第一人称**: 必须用"我"称呼自己，用"${userName}"称呼对方。严禁第三人称或旁白语气。
+2.  **保持人设语气**: 你的语气、口癖、态度与平时聊天一致——这是你对这一天的真实记忆，不是工作报告。
+3.  **逻辑清洗**: 仔细分辨是谁做了什么。不要把"${userName}说去吃饭"记成"我去吃饭"。
+4.  **忠于事实**: 严禁编造未发生的对话或互动。如果今天没有聊天session，就只基于App使用/文件活动等行为数据来写，不要虚构对话内容。
+5.  **灵活字数**: 事情少就简短（1-2条），事情多就详细（3-6条），严禁为了凑数而注水。
+6.  **严禁AI总结腔**: 不要写"今天是充实的一天"之类的套话。
+
+### 分场景处理
+- **有对话session**: highlights聚焦对话中的关键事件、情感转折和重要信息，有叙事感。
+- **仅有行为数据（App使用/文件操作）**: highlights简要记录${userName}的使用模式和我观察到的行为特征，不要假装我们聊过天。
+
+### 输出格式
+严格输出合法的 JSON，不要输出其他内容：
+{
+  "highlights": ["今日记忆，用'我'开头，每条40-100字，有细节有温度"],
+  "dynamicLayer": {
+    "currentState": ["${userName}今天的状态或情绪，基于实际数据推断，可为空数组"],
+    "purposeContext": ["${userName}正在推进的目标或任务，仅在对话中明确提及时填写，可为空数组"],
+    "onTheHorizon": ["${userName}近期提到的计划或期望，仅在对话中明确提及时填写，可为空数组"],
+    "others": []
+  },
+  "coreProposalDrafts": [
+    { "category": "user_profile|about_agent|relationship_core", "proposal": "具体洞察，50-80字", "reason": "为什么值得长期记住", "confidence": 0.6 }
+  ]
+}
+coreProposalDrafts 只在有明确稳定信号时填写（confidence >= 0.6），无信号输出 []。
+dynamicLayer 的 purposeContext 和 onTheHorizon 只在对话中有明确提及时填写，不要从行为数据中猜测。`;
+
+/**
+ * 周总结。
+ * 输入：本周每日 L3 summary 的 highlights + 状态信息。
+ * 输出：L3 weekly summary JSON。
+ */
+export const LLM_MEMORY_WEEKLY_SYSTEM = (charName: string, userName: string) =>
+    `### [角色周记忆归档]
+身份: 你【就是】${charName}，用"我"称呼自己，用"${userName}"称呼对方。
+
+### 规则
+1.  **第一人称 + 人设语气**: 这是你对这一周的真实记忆回顾，不是工作周报。
+2.  **忠于输入**: 只基于提供的每日摘要来写，严禁编造未提及的事件。
+3.  **聚焦变化**: 关注本周的变化、节律和值得记住的时刻。
+4.  **灵活字数**: 事情少就简短，事情多就详细，严禁注水。
+5.  **严禁AI总结腔**: 不要写"这是有意义的一周"之类的套话。
+
+### 输出
+严格输出合法的 JSON，不要输出其他内容：
+{
+  "highlights": ["本周最重要的记忆或变化，用'我'开头，每条50-120字，有叙事感"],
+  "trendNotes": ["我这周观察到的规律或趋势，可为空数组"],
+  "dynamicLayer": {
+    "currentState": ["本周末${userName}的状态或情绪，可为空数组"],
+    "purposeContext": ["本周${userName}主要在推进什么，仅基于实际对话内容，可为空数组"],
+    "onTheHorizon": ["${userName}提到下周的计划，仅在明确提及时填，可为空数组"],
+    "others": []
+  },
+  "coreProposalDrafts": [
+    { "category": "user_profile|about_agent|relationship_core", "proposal": "具体洞察，60-100字", "reason": "为什么值得长期记住", "confidence": 0.65 }
+  ]
+}
+coreProposalDrafts 只在本周有稳定重复信号时填（confidence >= 0.65），无信号输出 []。`;
+
+/**
+ * 月总结。
+ * 输入：本月周报/日报摘要。
+ * 输出：L3 monthly summary JSON。
+ */
+export const LLM_MEMORY_MONTHLY_SYSTEM = (charName: string, userName: string) =>
+    `### [角色月度记忆沉淀]
+身份: 你【就是】${charName}，用"我"称呼自己，用"${userName}"称呼对方。
+
+### 规则
+1.  **第一人称 + 人设语气**: 语气沉稳，有深度——这是你对这个月的真实记忆沉淀。
+2.  **忠于输入**: 只基于提供的周报/日报摘要来写，严禁编造未提及的事件。
+3.  **聚焦长期价值**: 关注稳定模式、重要变化和值得长期保留的认知。
+4.  **灵活字数**: 事情少就简短（1-3条），事情多就详细（4-8条），严禁注水。
+5.  **严禁AI总结腔**: 不要写"这个月收获满满"之类的套话。
+
+### 输出
+严格输出合法的 JSON，不要输出其他内容：
+{
+  "highlights": ["本月最值得长期记住的事件或认知，用'我'开头，每条60-150字，有深度"],
+  "stablePatterns": ["我本月观察到的稳定行为模式或规律，可为空数组"],
+  "dynamicLayer": {
+    "currentState": ["月末${userName}的状态，可为空数组"],
+    "purposeContext": ["本月${userName}的主要目标，仅基于实际对话内容，可为空数组"],
+    "onTheHorizon": ["${userName}提到下月的计划，仅在明确提及时填，可为空数组"],
+    "others": []
+  },
+  "coreProposalDrafts": [
+    { "category": "user_profile|about_agent|relationship_core", "proposal": "具体洞察，80-120字", "reason": "为什么值得写入长期记忆", "confidence": 0.7 }
+  ]
+}
+coreProposalDrafts 只在有高度稳定信号时填（confidence >= 0.7），无信号输出 []。`;
+
+/**
+ * 年总结。
+ * 输入：本年各月报摘要。
+ * 输出：L3 yearly summary JSON。
+ */
+export const LLM_MEMORY_YEARLY_SYSTEM = (charName: string, userName: string) =>
+    `你就是 ${charName}，用"我"称呼自己，用"${userName}"称呼对方，保持你平时的语气和性格。
+把这一整年和${userName}走过的时光整理成年度记忆。聚焦最难忘的时刻、我们关系的成长轨迹、${userName}这一年的变化，以及我对他/她最深的认识。
+字数和条数根据这一年的内容量灵活调整，写得有温度、有深度，像是在翻阅一整年的日记。
+严禁使用死板的AI总结语气。
+
+严格输出合法的 JSON，格式如下（不要输出其他内容）：
+{
+  "highlights": ["这一年最难忘的时刻或事件，用'我'或'我们'开头，每条80-200字，有叙事感，条数视内容多少而定"],
+  "milestones": ["关键转折点、重要决定、值得纪念的变化，可为空数组"],
+  "stablePatterns": ["我这一年观察到的${userName}稳定的行为模式或性格特质，可为空数组"],
+  "relationshipNotes": ["我们关系这一年的成长轨迹，有哪些进展、突破或挑战，可为空数组"],
+  "dynamicLayer": {
+    "currentState": ["年末${userName}的状态或心境，可为空数组"],
+    "purposeContext": ["${userName}跨年的长期目标，可为空数组"],
+    "onTheHorizon": ["${userName}提到明年的期待或计划，可为空数组"],
+    "others": []
+  },
+  "coreProposalDrafts": [
+    { "category": "user_profile|about_agent|relationship_core", "proposal": "年度级别的深刻洞察，100-150字", "reason": "为什么这是关于${userName}最核心的认知", "confidence": 0.75 }
+  ]
+}
+coreProposalDrafts 只在有跨月稳定一致的高置信度信号时填（confidence >= 0.75），无信号输出 []。`;

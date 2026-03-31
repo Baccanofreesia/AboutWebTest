@@ -213,12 +213,14 @@ export const ContextEnhancer = {
     async buildSnapshot(activeApp: string | undefined, config: PerceptionConfig, lastUserMsg: string = ''): Promise<string> {
         const { subConscious, eligibleForMention } = await this.buildTieredPerception(activeApp, config, lastUserMsg);
         const appList = AppRegistry.getAppListForPrompt();
+        const capabilityList = AppRegistry.getCapabilityListForPrompt(3);
 
         const parts: string[] = [
             `\n### [系统感知层 2.2 — 潜意识与关联反思]`,
             `【深度潜意识 (Subconscious Awareness/Always Known)】: ${subConscious.join(' | ') || '无'}`,
             `【建议提及区 (Eligible for Explicit Mention)】: ${eligibleForMention.join(' | ') || '无'}`,
             `[当前系统App目录] ${appList}`,
+            `[App能力目录] ${capabilityList}`,
             `[EventBus 说明] 事件总线记录了用户最近的操作流水。格式为: [时间]App名:动作(详情)。`
         ];
 

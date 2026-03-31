@@ -464,16 +464,22 @@ export const XhsMcpClient = {
     publishNote: async (serverUrl: string, params: {
         title: string; content: string; images?: string[]; tags?: string[]; is_private?: boolean;
     }): Promise<McpToolResult> => {
+        const normalizedImages = (params.images || [])
+            .map((img) => String(img || '').trim())
+            .filter(Boolean);
         if (detectMode(serverUrl) === 'bridge') {
+            if (normalizedImages.length === 0) {
+                return { success: false, error: 'Bridge 发布图文至少需要 1 张图片，请先准备素材。' };
+            }
             const isPrivate = !!params.is_private;
             return bridgePost(serverUrl, 'publish', {
                 title: params.title, content: params.content,
-                images: params.images || [], tags: params.tags || [],
+                images: normalizedImages, tags: params.tags || [],
                 is_private: isPrivate,
                 visibility: isPrivate ? 'private' : undefined,
             });
         }
-        const args = { ...params, images: params.images || [] };
+        const args = { ...params, images: normalizedImages };
         return mcpCallTool(serverUrl, 'publish_note', args);
     },
 

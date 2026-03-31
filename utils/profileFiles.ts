@@ -39,7 +39,7 @@ const normalizeValue = (value: string): string => {
     const trimmed = (value || '').trim();
     if (!trimmed) return '';
     const lowered = trimmed.toLowerCase();
-    if (['default', 'n/a', 'na', 'none', 'null'].includes(lowered)) return '';
+    if (['default', 'n/a', 'na', 'none', 'null', 'user'].includes(lowered)) return '';
     return trimmed;
 };
 
@@ -167,22 +167,22 @@ export const parseUserProfileMarkdown = (content: string): UserProfileData | nul
     const hasNicknameField = /^\s*(?:-\s*)?Nickname\s*:/im.test(content);
     const hasPreferredNameField = /^\s*(?:-\s*)?Preferred name\s*:/im.test(content);
     const hasPreferredNamesField = /^\s*(?:-\s*)?Preferred names\s*:/im.test(content);
-    
+
     let nickname = normalizeValue(matchLine(content, 'Nickname'));
     let preferredNames: string[] = [];
-    
-    const prefRaw = matchLine(content, 'Preferred name') || matchLine(content, 'Preferred names');
+
+    const prefRaw = normalizeValue(matchLine(content, 'Preferred name') || matchLine(content, 'Preferred names'));
     if (prefRaw) {
         preferredNames = prefRaw.split(/[,，\n]/).map(n => n.trim()).filter(Boolean);
     }
-    
+
     if (!hasNicknameField && (hasPreferredNameField || hasPreferredNamesField)) nickname = '';
     const avatar = normalizeValue(matchLine(content, 'Avatar'));
     const persona = extractSection(content, 'Persona') || extractSection(content, 'Notes');
     const notesLine = matchLine(content, 'Notes');
     const notesBlock = extractNotesBlock(content);
     const bio = persona || notesBlock || notesLine;
-    
+
     if (!name && !nickname && preferredNames.length === 0 && !avatar && !bio) return null;
     return {
         name: name || undefined,
@@ -194,7 +194,7 @@ export const parseUserProfileMarkdown = (content: string): UserProfileData | nul
 };
 
 export const buildUserProfileMarkdown = (data: UserProfileData): string => {
-    const name = (data.name || 'User').trim();
+    const name = (data.name || '').trim();
     const nickname = (data.nickname || '').trim();
     const preferredNames = (data.preferredNames || []).join(', ');
     const avatar = (data.avatar || '').trim();

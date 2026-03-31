@@ -12,7 +12,7 @@ const App: React.FC = () => {
       {/* 
          手机模拟器容器逻辑:
          1. Mobile (默认): fixed inset-0, z-50, w-full h-full (全屏覆盖)
-         2. Desktop (md以上): relative, h-[85vh], aspect-[9/19.5], 有圆角 and 边框
+         2. Desktop (md以上): relative, h-[85vh], aspect-[9/19.5], 有圆角和边框
       */}
       <div className={`
         fixed inset-0 w-full h-full z-0 bg-black 

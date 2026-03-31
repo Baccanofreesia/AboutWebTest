@@ -1,7 +1,8 @@
 
 
 
-import { AgentProfile, CharacterProfile, Message, ChatTheme, FullBackupData, GalleryImage, UserProfile, DiaryEntry, Task, Anniversary, CronJob, ImageDetail, RelationEvent, StickerUsageRecord, XhsStockImage, XhsActivityRecord } from '../types';
+import { AgentProfile, CharacterProfile, Message, ChatTheme, FullBackupData, GalleryImage, UserProfile, DiaryEntry, Task, Anniversary, CronJob, ImageDetail, RelationEvent, StickerUsageRecord, XhsStockImage, XhsActivityRecord, UsageEvent, ToolAuditRecord } from '../types';
+import { usageTracker } from './usageTracker';
 
 const resolveDbEnv = (): string => {
     const env = (import.meta as any).env || {};
@@ -15,7 +16,7 @@ const resolveDbEnv = (): string => {
 
 const DB_NAME = `AetherOS_Data_${resolveDbEnv()}`;
 // CRITICAL FIX: Increment version to force `onupgradeneeded` on devices that have an old schema
-const DB_VERSION = 21;
+const DB_VERSION = 22;
 
 const STORE_CHARACTERS = 'characters';
 const STORE_MESSAGES = 'messages';
@@ -35,6 +36,8 @@ const STORE_RELATION_EVENTS = 'relation_events';
 const STORE_STICKER_USAGE = 'sticker_usage';
 const STORE_XHS_STOCK = 'xhs_stock';
 const STORE_XHS_ACTIVITIES = 'xhs_activities';
+const STORE_USAGE_EVENTS = 'usage_events';
+const STORE_TOOL_AUDIT = 'tool_audit';
 
 // --- Workspace File Type ---
 export interface WorkspaceFile {
@@ -116,6 +119,17 @@ const openDB = (): Promise<IDBDatabase> => {
             if (!db.objectStoreNames.contains(STORE_XHS_ACTIVITIES)) {
                 const xhsActStore = db.createObjectStore(STORE_XHS_ACTIVITIES, { keyPath: 'id' });
                 xhsActStore.createIndex('characterId', 'characterId', { unique: false });
+            }
+            if (!db.objectStoreNames.contains(STORE_USAGE_EVENTS)) {
+                const usageStore = db.createObjectStore(STORE_USAGE_EVENTS, { keyPath: 'id' });
+                usageStore.createIndex('dayKey', 'dayKey', { unique: false });
+                usageStore.createIndex('appId', 'appId', { unique: false });
+                usageStore.createIndex('ts', 'ts', { unique: false });
+            }
+            if (!db.objectStoreNames.contains(STORE_TOOL_AUDIT)) {
+                const auditStore = db.createObjectStore(STORE_TOOL_AUDIT, { keyPath: 'id' });
+                auditStore.createIndex('ts', 'ts', { unique: false });
+                auditStore.createIndex('action', 'action', { unique: false });
             }
         };
     });
@@ -402,6 +416,9 @@ export const DB = {
             relatedPath: input.relatedPath,
             updatedAt: Date.now()
         } as ImageDetail);
+        if (input.source === 'user') {
+            usageTracker.recordCustomEvent({ appId: 'gallery', action: 'update', refType: 'photo_detail', refId: normalized, detail: input.detail.substring(0, 60), importance: 0.7 });
+        }
     },
 
     deleteImageDetailByFileName: async (fileName: string): Promise<void> => {
@@ -430,6 +447,106 @@ export const DB = {
             req.onsuccess = () => {
                 const rows = (req.result || []) as RelationEvent[];
                 rows.sort((a, b) => a.timestamp - b.timestamp);
+                resolve(rows.slice(-limit));
+            };
+            req.onerror = () => reject(req.error);
+        });
+    },
+
+    // --- Usage Events (Behavior Index hot store) ---
+
+    saveUsageEvent: async (event: UsageEvent): Promise<void> => {
+        const db = await openDB();
+        if (!db.objectStoreNames.contains(STORE_USAGE_EVENTS)) return;
+        const tx = db.transaction(STORE_USAGE_EVENTS, 'readwrite');
+        tx.objectStore(STORE_USAGE_EVENTS).put(event);
+    },
+
+    saveUsageEvents: async (events: UsageEvent[]): Promise<void> => {
+        if (!events || events.length === 0) return;
+        const db = await openDB();
+        if (!db.objectStoreNames.contains(STORE_USAGE_EVENTS)) return;
+        const tx = db.transaction(STORE_USAGE_EVENTS, 'readwrite');
+        const store = tx.objectStore(STORE_USAGE_EVENTS);
+        for (const ev of events) store.put(ev);
+        return new Promise((resolve, reject) => {
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    },
+
+    getUsageEventsByDay: async (dayKey: string, limit: number = 1000): Promise<UsageEvent[]> => {
+        const db = await openDB();
+        if (!db.objectStoreNames.contains(STORE_USAGE_EVENTS)) return [];
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_USAGE_EVENTS, 'readonly');
+            const store = tx.objectStore(STORE_USAGE_EVENTS);
+            const index = store.index('dayKey');
+            const req = index.getAll(IDBKeyRange.only(dayKey));
+            req.onsuccess = () => {
+                const rows = (req.result || []) as UsageEvent[];
+                rows.sort((a, b) => a.ts - b.ts);
+                resolve(rows.slice(-limit));
+            };
+            req.onerror = () => reject(req.error);
+        });
+    },
+
+    getRecentUsageEvents: async (limit: number = 200): Promise<UsageEvent[]> => {
+        const db = await openDB();
+        if (!db.objectStoreNames.contains(STORE_USAGE_EVENTS)) return [];
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_USAGE_EVENTS, 'readonly');
+            const req = tx.objectStore(STORE_USAGE_EVENTS).getAll();
+            req.onsuccess = () => {
+                const rows = (req.result || []) as UsageEvent[];
+                rows.sort((a, b) => a.ts - b.ts);
+                resolve(rows.slice(-limit));
+            };
+            req.onerror = () => reject(req.error);
+        });
+    },
+
+    deleteUsageEventsBefore: async (cutoffTs: number): Promise<void> => {
+        const db = await openDB();
+        if (!db.objectStoreNames.contains(STORE_USAGE_EVENTS)) return;
+        const tx = db.transaction(STORE_USAGE_EVENTS, 'readwrite');
+        const store = tx.objectStore(STORE_USAGE_EVENTS);
+        const req = store.openCursor();
+        return new Promise((resolve, reject) => {
+            req.onsuccess = () => {
+                const cursor = req.result;
+                if (!cursor) return;
+                const row = cursor.value as UsageEvent;
+                if (typeof row?.ts === 'number' && row.ts < cutoffTs) {
+                    cursor.delete();
+                }
+                cursor.continue();
+            };
+            req.onerror = () => reject(req.error);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    },
+
+    // --- Tool Audit ---
+
+    saveToolAudit: async (record: ToolAuditRecord): Promise<void> => {
+        const db = await openDB();
+        if (!db.objectStoreNames.contains(STORE_TOOL_AUDIT)) return;
+        const tx = db.transaction(STORE_TOOL_AUDIT, 'readwrite');
+        tx.objectStore(STORE_TOOL_AUDIT).put(record);
+    },
+
+    getRecentToolAudit: async (limit: number = 100): Promise<ToolAuditRecord[]> => {
+        const db = await openDB();
+        if (!db.objectStoreNames.contains(STORE_TOOL_AUDIT)) return [];
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_TOOL_AUDIT, 'readonly');
+            const req = tx.objectStore(STORE_TOOL_AUDIT).getAll();
+            req.onsuccess = () => {
+                const rows = (req.result || []) as ToolAuditRecord[];
+                rows.sort((a, b) => a.ts - b.ts);
                 resolve(rows.slice(-limit));
             };
             req.onerror = () => reject(req.error);
@@ -516,12 +633,14 @@ export const DB = {
         const db = await openDB();
         const transaction = db.transaction(STORE_DIARIES, 'readwrite');
         transaction.objectStore(STORE_DIARIES).put(diary);
+        usageTracker.recordCustomEvent({ appId: 'journal', action: 'write', refType: 'diary_entry', refId: diary.id, detail: diary.date, importance: 0.8 });
     },
 
     deleteDiary: async (id: string): Promise<void> => {
         const db = await openDB();
         const transaction = db.transaction(STORE_DIARIES, 'readwrite');
         transaction.objectStore(STORE_DIARIES).delete(id);
+        usageTracker.recordCustomEvent({ appId: 'journal', action: 'delete', refType: 'diary_entry', refId: id, importance: 0.5 });
     },
 
     // --- Tasks (Schedule App) ---
@@ -544,12 +663,18 @@ export const DB = {
         const db = await openDB();
         const transaction = db.transaction(STORE_TASKS, 'readwrite');
         transaction.objectStore(STORE_TASKS).put(task);
+        usageTracker.recordCustomEvent({
+            appId: 'schedule', action: task.isCompleted ? 'complete' : 'write',
+            refType: 'task', refId: task.id, detail: task.title.substring(0, 60),
+            importance: task.isCompleted ? 0.8 : 0.7,
+        });
     },
 
     deleteTask: async (id: string): Promise<void> => {
         const db = await openDB();
         const transaction = db.transaction(STORE_TASKS, 'readwrite');
         transaction.objectStore(STORE_TASKS).delete(id);
+        usageTracker.recordCustomEvent({ appId: 'schedule', action: 'delete', refType: 'task', refId: id, importance: 0.5 });
     },
 
     // --- Anniversaries (Schedule App) ---
@@ -572,12 +697,14 @@ export const DB = {
         const db = await openDB();
         const transaction = db.transaction(STORE_ANNIVERSARIES, 'readwrite');
         transaction.objectStore(STORE_ANNIVERSARIES).put(anniversary);
+        usageTracker.recordCustomEvent({ appId: 'schedule', action: 'write', refType: 'anniversary', refId: anniversary.id, detail: `${anniversary.title} ${anniversary.date}`, importance: 0.75 });
     },
 
     deleteAnniversary: async (id: string): Promise<void> => {
         const db = await openDB();
         const transaction = db.transaction(STORE_ANNIVERSARIES, 'readwrite');
         transaction.objectStore(STORE_ANNIVERSARIES).delete(id);
+        usageTracker.recordCustomEvent({ appId: 'schedule', action: 'delete', refType: 'anniversary', refId: id, importance: 0.5 });
     },
 
     // --- Cron Jobs ---
@@ -629,6 +756,29 @@ export const DB = {
         const db = await openDB();
         const tx = db.transaction(STORE_WORKSPACE, 'readwrite');
         tx.objectStore(STORE_WORKSPACE).delete(id);
+    },
+
+    deleteWorkspaceFilesByName: async (name: string): Promise<void> => {
+        const db = await openDB();
+        if (!db.objectStoreNames.contains(STORE_WORKSPACE)) return;
+        const tx = db.transaction(STORE_WORKSPACE, 'readwrite');
+        const store = tx.objectStore(STORE_WORKSPACE);
+        const req = store.openCursor();
+        const safeName = String(name || '').trim();
+        return new Promise((resolve, reject) => {
+            req.onsuccess = () => {
+                const cursor = req.result;
+                if (!cursor) return;
+                const row = cursor.value as WorkspaceFile;
+                if (String(row?.name || '').trim() === safeName) {
+                    cursor.delete();
+                }
+                cursor.continue();
+            };
+            req.onerror = () => reject(req.error);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
     },
 
     clearWorkspaceFiles: async (): Promise<void> => {

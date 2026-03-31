@@ -133,7 +133,7 @@ const chatMimeFromName = (name: string) => {
 const chatFileToDataUrl = (file: File): Promise<string> => new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = () => resolve(String(r.result || ''));
-    r.onerror = () => reject(r.error || new Error('璇诲彇澶辫触'));
+    r.onerror = () => reject(r.error || new Error('读取失败'));
     r.readAsDataURL(file);
 });
 
@@ -234,6 +234,7 @@ const Chat: React.FC = () => {
     const [selectedEmoji, setSelectedEmoji] = useState<{ name: string, url: string } | null>(null);
     const [editContent, setEditContent] = useState('');
     const [replyTarget, setReplyTarget] = useState<Message | null>(null);
+    const [jumpTargetMessageId, setJumpTargetMessageId] = useState<number | null>(null);
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedMsgIds, setSelectedMsgIds] = useState<Set<number>>(new Set());
     const [allHistoryMessages, setAllHistoryMessages] = useState<Message[]>([]);
@@ -253,6 +254,7 @@ const Chat: React.FC = () => {
     const [pickerLoading, setPickerLoading] = useState(false);
     const [pickerVisibleCount, setPickerVisibleCount] = useState(45);
     const mediaDetailCacheRef = useRef<Map<string, { detail: string; ts: number; videoFrames?: string[] }>>(new Map());
+    const jumpHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // ── Voice Mode State & TTS ──
     const [voiceMode, setVoiceMode] = useState(false);
@@ -347,6 +349,10 @@ const Chat: React.FC = () => {
             if (voiceLockTimerRef.current) {
                 clearTimeout(voiceLockTimerRef.current);
                 voiceLockTimerRef.current = null;
+            }
+            if (jumpHighlightTimerRef.current) {
+                clearTimeout(jumpHighlightTimerRef.current);
+                jumpHighlightTimerRef.current = null;
             }
         };
     }, []);
@@ -1432,6 +1438,20 @@ ${rawLog.substring(0, 8000)}`;
         addToast('已选择引用消息', 'success');
     };
 
+    const handleReplyJump = useCallback((targetMessageId: number) => {
+        if (!targetMessageId) return;
+        const targetIndex = messages.findIndex(msg => msg.id === targetMessageId);
+        if (targetIndex < 0) {
+            addToast('引用的消息不存在或已被删除', 'info');
+            return;
+        }
+        const neededVisibleCount = Math.max(30, messages.length - targetIndex);
+        if (neededVisibleCount > visibleCount) {
+            setVisibleCount(neededVisibleCount);
+        }
+        setJumpTargetMessageId(targetMessageId);
+    }, [addToast, messages, visibleCount]);
+
     const handleCopyMessage = async () => {
         if (!selectedMessage?.content) return;
         try {
@@ -1454,6 +1474,36 @@ ${rawLog.substring(0, 8000)}`;
         .filter(m => !(char?.hideSystemLogs && m.role === 'system'))
         .slice(-visibleCount);
 
+    useLayoutEffect(() => {
+        if (!jumpTargetMessageId) return;
+        const container = scrollRef.current;
+        if (!container) return;
+        let cancelled = false;
+        const run = () => {
+            if (cancelled) return;
+            const target = container.querySelector(`[data-message-id="${jumpTargetMessageId}"]`) as HTMLElement | null;
+            if (!target) return;
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            target.classList.remove('reply-jump-highlight');
+            void target.offsetWidth;
+            target.classList.add('reply-jump-highlight');
+            if (jumpHighlightTimerRef.current) {
+                clearTimeout(jumpHighlightTimerRef.current);
+            }
+            jumpHighlightTimerRef.current = setTimeout(() => {
+                target.classList.remove('reply-jump-highlight');
+            }, 1600);
+            setJumpTargetMessageId(null);
+        };
+        const raf1 = requestAnimationFrame(() => {
+            requestAnimationFrame(run);
+        });
+        return () => {
+            cancelled = true;
+            cancelAnimationFrame(raf1);
+        };
+    }, [jumpTargetMessageId, displayMessages.length]);
+
     // Use callBusy and callStatusLabel from callManager directly (already destructured above)
 
     return (
@@ -1467,6 +1517,17 @@ ${rawLog.substring(0, 8000)}`;
         >
             {/* Dynamic Style Injection for Custom CSS */}
             {activeTheme.customCss && <style>{activeTheme.customCss}</style>}
+            <style>{`
+                @keyframes reply-jump-flash {
+                    0% { box-shadow: 0 0 0 0 rgba(59,130,246,0); background-color: transparent; }
+                    30% { box-shadow: 0 0 0 2px rgba(59,130,246,0.45); background-color: rgba(59,130,246,0.08); }
+                    100% { box-shadow: 0 0 0 0 rgba(59,130,246,0); background-color: transparent; }
+                }
+                .reply-jump-highlight {
+                    border-radius: 16px;
+                    animation: reply-jump-flash 1.2s ease;
+                }
+            `}</style>
 
 
             <ChatModals
@@ -1539,10 +1600,12 @@ ${rawLog.substring(0, 8000)}`;
                         const url = selectedMessage.content;
                         // Infer name from metadata or URL
                         const name = selectedMessage.metadata?.stickerName || url.split('/').pop()?.split('.')[0] || '收藏表情';
-                        const ok = await StickerParser.favoriteSticker(workspaceRootPath, name, url, allowGlobal);
-                        if (ok) {
+                        const favoriteResult = await StickerParser.favoriteSticker(workspaceRootPath, name, url, allowGlobal);
+                        if (favoriteResult === 'success') {
                             setPickerKey(prev => prev + 1);
                             addToast('已收藏到表情包', 'success');
+                        } else if (favoriteResult === 'duplicate') {
+                            addToast('已收藏过该表情', 'success');
                         } else {
                             addToast('收藏失败', 'error');
                         }
@@ -1646,72 +1709,96 @@ ${rawLog.substring(0, 8000)}`;
                         </div>
                     </div>
                     <button onClick={() => triggerAI(messages)} disabled={isTyping} className={`p-2 rounded-full ${isTyping ? 'bg-slate-100' : 'bg-primary/10 text-primary'}`}><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" /></svg></button>
-                </div>
+                    {/* Pending proposals badge — navigates to CheckPhone review panel */}
+                    {(char?.coreProposals ?? []).some(p => p.status === 'pending') && (
+                        <button
+                            onClick={() => openApp(AppID.CheckPhone)}
+                            className="relative p-2 rounded-full bg-amber-50 text-amber-500 active:scale-95 transition-transform"
+                            title="有待审记忆提案"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
+                            </svg>
+                            <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-red-500 rounded-full border-2 border-white flex items-center justify-center">
+                                <span className="text-[8px] font-bold text-white leading-none">
+                                    {Math.min((char?.coreProposals ?? []).filter(p => p.status === 'pending').length, 9)}
+                                </span>
+                            </span>
+                        </button>
+                    )}
+                </div >
                 {isSummarizing && (
                     <div className="absolute top-full left-0 w-full bg-indigo-50 border-b border-indigo-100 p-2 flex items-center justify-center gap-2">
                         <div className="w-3 h-3 border-2 border-indigo-200 border-t-indigo-500 rounded-full animate-spin"></div>
                         <span className="text-xs text-indigo-600 font-medium">正在整理记忆档案，请稍候...</span>
                     </div>
                 )}
-            </div>
+            </div >
 
             {/* Messages */}
-            <div ref={scrollRef} className="flex-1 overflow-y-auto pt-6 pb-6 no-scrollbar" style={{ backgroundImage: activeTheme.type === 'custom' && activeTheme.user.backgroundImage ? 'none' : undefined }}>
+            < div ref={scrollRef} className="flex-1 overflow-y-auto pt-6 pb-6 no-scrollbar" style={{ backgroundImage: activeTheme.type === 'custom' && activeTheme.user.backgroundImage ? 'none' : undefined }}>
 
-                {messages.length > visibleCount && (
-                    <div className="flex justify-center mb-6">
-                        <button
-                            onClick={() => setVisibleCount(prev => prev + 30)}
-                            className="px-4 py-2 bg-white/50 backdrop-blur-sm rounded-full text-xs text-slate-500 shadow-sm border border-white hover:bg-white transition-colors"
-                        >
-                            加载历史消息 ({messages.length - visibleCount})
-                        </button>
-                    </div>
-                )}
-
-                {displayMessages.map((m, i) => {
-                    const prevRole = i > 0 ? displayMessages[i - 1].role : null;
-                    const nextRole = i < displayMessages.length - 1 ? displayMessages[i + 1].role : null;
-                    return (
-                        <ChatMessageItem
-                            key={m.id || i}
-                            msg={m}
-                            isFirstInGroup={prevRole !== m.role}
-                            isLastInGroup={nextRole !== m.role}
-                            activeTheme={activeTheme}
-                            charAvatar={charDisplayAvatar}
-                            charName={charDisplayName}
-                            userAvatar={userDisplayAvatar}
-                            onLongPress={handleMessageLongPress}
-                            translationEnabled={translationEnabled}
-                            isShowingTarget={showingTargetIds.has(m.id)}
-                            onTranslateToggle={handleTranslateToggle}
-                            selectionMode={selectionMode}
-                            isSelected={selectedMsgIds.has(m.id)}
-                            onSelectionToggle={handleSelectionToggle}
-                            workspaceRootPath={workspaceRootPath}
-                            allowGlobal={allowGlobal}
-                            onDirectDelete={handleDirectDelete}
-                        />
-                    );
-                })}
-
-                {(isTyping || recallStatus) && (
-                    <div className="flex items-end gap-3 px-3 mb-6 animate-fade-in">
-                        <img src={charDisplayAvatar} className="w-9 h-9 rounded-[10px] object-cover" />
-                        <div className="bg-white px-4 py-3 rounded-2xl shadow-sm">
-                            {recallStatus ? (
-                                <div className="flex items-center gap-2 text-xs text-indigo-500 font-medium">
-                                    <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                                    {recallStatus}
-                                </div>
-                            ) : (
-                                <div className="flex gap-1"><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce"></div><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce delay-75"></div><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce delay-150"></div></div>
-                            )}
+                {
+                    messages.length > visibleCount && (
+                        <div className="flex justify-center mb-6">
+                            <button
+                                onClick={() => setVisibleCount(prev => prev + 30)}
+                                className="px-4 py-2 bg-white/50 backdrop-blur-sm rounded-full text-xs text-slate-500 shadow-sm border border-white hover:bg-white transition-colors"
+                            >
+                                加载历史消息 ({messages.length - visibleCount})
+                            </button>
                         </div>
-                    </div>
-                )}
-            </div>
+                    )
+                }
+
+                {
+                    displayMessages.map((m, i) => {
+                        const prevRole = i > 0 ? displayMessages[i - 1].role : null;
+                        const nextRole = i < displayMessages.length - 1 ? displayMessages[i + 1].role : null;
+                        return (
+                            <ChatMessageItem
+                                key={m.id || i}
+                                msg={m}
+                                isFirstInGroup={prevRole !== m.role}
+                                isLastInGroup={nextRole !== m.role}
+                                activeTheme={activeTheme}
+                                charAvatar={charDisplayAvatar}
+                                charName={charDisplayName}
+                                userAvatar={userDisplayAvatar}
+                                onLongPress={handleMessageLongPress}
+                                translationEnabled={translationEnabled}
+                                isShowingTarget={showingTargetIds.has(m.id)}
+                                onTranslateToggle={handleTranslateToggle}
+                                selectionMode={selectionMode}
+                                isSelected={selectedMsgIds.has(m.id)}
+                                onSelectionToggle={handleSelectionToggle}
+                                workspaceRootPath={workspaceRootPath}
+                                allowGlobal={allowGlobal}
+                                onDirectDelete={handleDirectDelete}
+                                onReplyJump={handleReplyJump}
+                            />
+                        );
+                    })
+                }
+
+                {
+                    (isTyping || recallStatus) && (
+                        <div className="flex items-end gap-3 px-3 mb-6 animate-fade-in">
+                            <img src={charDisplayAvatar} className="w-9 h-9 rounded-[10px] object-cover" />
+                            <div className="bg-white px-4 py-3 rounded-2xl shadow-sm">
+                                {recallStatus ? (
+                                    <div className="flex items-center gap-2 text-xs text-indigo-500 font-medium">
+                                        <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                        {recallStatus}
+                                    </div>
+                                ) : (
+                                    <div className="flex gap-1"><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce"></div><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce delay-75"></div><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce delay-150"></div></div>
+                                )}
+                            </div>
+                        </div>
+                    )
+                }
+            </div >
 
             <div className={`bg-white/90 backdrop-blur-2xl border-t border-slate-200/50 pb-safe shrink-0 z-40 shadow-[0_-5px_15px_rgba(0,0,0,0.02)] relative ${selectionMode ? 'pb-3' : ''}`}>
                 {selectionMode ? (
@@ -1949,7 +2036,12 @@ ${rawLog.substring(0, 8000)}`;
                             <StickerPicker
                                 key={pickerKey}
                                 workspaceRootPath={workspaceRootPath || ''}
-                                onSelect={(item) => handleSendText(item.url, 'emoji', { stickerName: item.name })}
+                                onSelect={(item) => {
+                                    setShowPanel('none');
+                                    window.requestAnimationFrame(() => {
+                                        void handleSendText(item.url, 'emoji', { stickerName: item.name });
+                                    });
+                                }}
                                 addToast={addToast}
                                 onDeleteFav={async (item) => {
                                     if (await StickerParser.deleteFavorite(workspaceRootPath || '', item.url)) {
@@ -1996,7 +2088,7 @@ ${rawLog.substring(0, 8000)}`;
                 )}
             </div>
             {/* Persistent Hidden Inputs */}
-        </div>
+        </div >
     );
 };
 

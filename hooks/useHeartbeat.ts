@@ -19,7 +19,7 @@ export interface UseHeartbeatOptions {
     agentName: string;
     userName: string;
     lastMsgTimestamp: number | undefined;
-    onHeartbeatMessage: (content: string) => void;
+    onHeartbeatMessage: (content: string, meta?: Record<string, unknown>) => void;
     onUpdateConfig: (config: HeartbeatConfig) => void;
     enabled: boolean;
 }
@@ -55,11 +55,11 @@ export function useHeartbeat(opts: UseHeartbeatOptions) {
 
             const resolved = resolveApiEndpoint(apiConfig);
             let requestBody: any = {
-                    model: apiConfig.model,
-                    messages: [{ role: 'user', content: prompt }],
-                    temperature: 0.6,
-                    max_tokens: 200,
-                };
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.6,
+                max_tokens: 200,
+            };
             if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
             const response = await fetch(resolved.chatUrl, {
                 method: 'POST',
@@ -72,7 +72,7 @@ export function useHeartbeat(opts: UseHeartbeatOptions) {
                 const text = data.choices?.[0]?.message?.content?.trim();
 
                 if (text && !text.includes(SILENT_TOKEN)) {
-                    onHeartbeatMessage(text);
+                    onHeartbeatMessage(text, { triggerSource: 'heartbeat' });
 
                     // Browser notification
                     if ('Notification' in window && Notification.permission === 'granted') {

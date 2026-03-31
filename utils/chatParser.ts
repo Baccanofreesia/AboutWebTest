@@ -5,6 +5,9 @@ import { syncWorkspaceFromDisk } from './workspaceSync';
 import { fileExt, inferMimeTypeByName } from './chatFiles';
 import { synthesizeSpeech, cleanTextForTts } from './ttsService';
 import { AgentProfile } from '../types';
+import { AppRegistry } from './appRegistry';
+import { ActionDispatcher } from './actionDispatcher';
+import { FileIndex } from './fileIndex';
 
 const failedImageDownloads: Record<string, number> = {};
 const failedVideoDownloads: Record<string, number> = {};
@@ -155,8 +158,138 @@ export const ChatParser = {
         const galleryAllowGlobal = !!apiConfig?.securityPolicy?.allowGlobalFileAccess;
         const workspaceRootPath = apiConfig?.nativeWorkspacePath?.trim() || '';
         const workspaceAllowGlobal = !!apiConfig?.securityPolicy?.allowGlobalFileAccess;
+        const DEFAULT_DYNAMIC_APP_CAPABILITIES = ['query_index', 'read_ref', 'search', 'resolve_file'];
 
         const toRelPath = (p: string) => p.replace(/^\/+/, '');
+        const normalizeIndexPath = (p: string) => {
+            const s = String(p || '').trim().replace(/\\/g, '/');
+            if (!s) return '';
+            return s.startsWith('/') ? s : `/${s}`;
+        };
+        const trackWorkspaceUpsertByAgent = async (path: string, reason: string) => {
+            if (!workspaceRootPath) return;
+            const normalizedPath = normalizeIndexPath(path);
+            if (!normalizedPath) return;
+            await FileIndex.trackFileUpsert({
+                indexRootPath: workspaceRootPath,
+                allowGlobal: workspaceAllowGlobal,
+                scope: 'workspace',
+                path: normalizedPath,
+                actor: 'agent',
+                reason,
+            }).catch(() => { });
+        };
+        const trackWorkspaceDeleteByAgent = async (path: string, reason: string) => {
+            if (!workspaceRootPath) return;
+            const normalizedPath = normalizeIndexPath(path);
+            if (!normalizedPath) return;
+            await FileIndex.trackFileDelete({
+                indexRootPath: workspaceRootPath,
+                allowGlobal: workspaceAllowGlobal,
+                scope: 'workspace',
+                path: normalizedPath,
+                actor: 'agent',
+                reason,
+            }).catch(() => { });
+        };
+        const trackWorkspaceMoveByAgent = async (fromPath: string, toPath: string, reason: string) => {
+            if (!workspaceRootPath) return;
+            const fromNormalized = normalizeIndexPath(fromPath);
+            const toNormalized = normalizeIndexPath(toPath);
+            if (!fromNormalized || !toNormalized) return;
+            await FileIndex.trackFileMove({
+                indexRootPath: workspaceRootPath,
+                allowGlobal: workspaceAllowGlobal,
+                scope: 'workspace',
+                fromPath: fromNormalized,
+                toPath: toNormalized,
+                actor: 'agent',
+                reason,
+            }).catch(() => { });
+        };
+        const trackDynamicAppUpsertByAgent = async (path: string, reason: string) => {
+            if (!workspaceRootPath) return;
+            await FileIndex.trackFileUpsert({
+                indexRootPath: workspaceRootPath,
+                allowGlobal: workspaceAllowGlobal,
+                scope: 'dynamic_app',
+                path,
+                actor: 'agent',
+                reason,
+            }).catch(() => { });
+        };
+        const extractDynamicAppIdFromPath = (path: string) => {
+            const normalized = String(path || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
+            const match = normalized.match(/^@agent_apps\/([^/]+)\.tsx$/i);
+            return match ? match[1] : '';
+        };
+        const reconcileDynamicAppMoveByAgent = async (fromPath: string, toPath: string) => {
+            const fromAppId = extractDynamicAppIdFromPath(fromPath);
+            const toAppId = extractDynamicAppIdFromPath(toPath);
+            if (!fromAppId && !toAppId) return;
+
+            if (fromAppId && !toAppId) {
+                // File moved out of @agent_apps/ entirely — not recoverable as an app
+                AppRegistry.permanentlyDeleteApp(fromAppId, {
+                    reason: 'agent_fs_move_out_dynamic_app',
+                    deletedBy: 'agent',
+                });
+                ActionDispatcher.unregisterApp(fromAppId);
+                await trackDynamicAppDeleteByAgent(fromPath, 'agent_fs_move_out_dynamic_app');
+                return;
+            }
+
+            if (!fromAppId && toAppId) {
+                AppRegistry.registerDynamicAppCapability(
+                    toAppId,
+                    DEFAULT_DYNAMIC_APP_CAPABILITIES,
+                    `${toAppId} - Agent dynamic app`,
+                );
+                ActionDispatcher.registerCapabilitiesForApp(toAppId, DEFAULT_DYNAMIC_APP_CAPABILITIES);
+                await trackDynamicAppUpsertByAgent(toPath, 'agent_fs_move_into_dynamic_app');
+                return;
+            }
+
+            if (fromAppId === toAppId) {
+                await trackDynamicAppUpsertByAgent(toPath, 'agent_fs_move_dynamic_app_path_update');
+                return;
+            }
+
+            const existing = AppRegistry.getDynamicAppCapability(fromAppId);
+            const existingCaps = existing?.capabilities || [];
+            const migratedCaps =
+                existingCaps.length > 0
+                    ? existingCaps
+                    : AppRegistry.getCapabilities(fromAppId);
+            const nextCaps = migratedCaps.length > 0 ? migratedCaps : DEFAULT_DYNAMIC_APP_CAPABILITIES;
+
+            // Rename: old app identity is truly gone (new name registered below)
+            AppRegistry.permanentlyDeleteApp(fromAppId, {
+                reason: 'agent_fs_move_dynamic_app_rename_from',
+                deletedBy: 'agent',
+            });
+            ActionDispatcher.unregisterApp(fromAppId);
+            await trackDynamicAppDeleteByAgent(fromPath, 'agent_fs_move_dynamic_app_rename_from');
+
+            AppRegistry.registerDynamicAppCapability(
+                toAppId,
+                nextCaps,
+                existing?.description || `${toAppId} - Agent dynamic app`,
+            );
+            ActionDispatcher.registerCapabilitiesForApp(toAppId, nextCaps);
+            await trackDynamicAppUpsertByAgent(toPath, 'agent_fs_move_dynamic_app_rename_to');
+        };
+        const trackDynamicAppDeleteByAgent = async (path: string, reason: string) => {
+            if (!workspaceRootPath) return;
+            await FileIndex.trackFileDelete({
+                indexRootPath: workspaceRootPath,
+                allowGlobal: workspaceAllowGlobal,
+                scope: 'dynamic_app',
+                path,
+                actor: 'agent',
+                reason,
+            }).catch(() => { });
+        };
         const normalizeProactiveDetail = (raw: string) => String(raw || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 30);
         const ensureProactiveDetail = (raw: string, mediaLabel: '图片' | '视频') => {
             const detail = normalizeProactiveDetail(raw);
@@ -580,16 +713,18 @@ export const ChatParser = {
         }
         content = content.replace(saveVideoFromUrlRegex, '').trim();
 
-        // <create_app name="AppName">
-        const createAppRegex = /<create_app\s+name="([^"]+)">([\s\S]*?)<\/create_app>/gi;
+        // <create_app name="AppName" capabilities="cap_a,cap_b">
+        const createAppRegex = /<create_app\s+name="([^"]+)"(?:\s+capabilities="([^"]+)")?\s*>[\r\n]*([\s\S]*?)<\/create_app>/gi;
         let appMatch;
         while ((appMatch = createAppRegex.exec(content)) !== null) {
             const appName = appMatch[1].trim();
-            const fileContent = appMatch[2].trim();
+            const capabilitiesRaw = (appMatch[2] || '').trim();
+            const fileContent = appMatch[3].trim();
 
             if (appName && fileContent) {
                 const now = Date.now();
-                const fileName = `@agent_apps/${appName.replace(/[^a-zA-Z0-9_-]/g, '')}.tsx`;
+                const safeAppName = appName.replace(/[^a-zA-Z0-9_-]/g, '');
+                const fileName = `@agent_apps/${safeAppName}.tsx`;
                 const newFile: any = {
                     id: `ws-${now}-${Math.random().toString(36).slice(2, 6)}`,
                     name: fileName,
@@ -602,6 +737,7 @@ export const ChatParser = {
                 };
 
                 await DB.saveWorkspaceFile(newFile);
+                await trackWorkspaceUpsertByAgent(fileName, 'agent_create_app_file');
 
                 if (apiConfig && apiConfig.nativeWorkspacePath) {
                     try {
@@ -621,9 +757,65 @@ export const ChatParser = {
                 setTimeout(() => {
                     window.dispatchEvent(new Event('agent_app_deployed'));
                 }, 1500);
+
+                const parsedCapabilities = capabilitiesRaw
+                    ? capabilitiesRaw.split(/[,\s]+/).map(x => x.trim()).filter(Boolean)
+                    : DEFAULT_DYNAMIC_APP_CAPABILITIES;
+                AppRegistry.registerDynamicAppCapability(safeAppName, parsedCapabilities, `${safeAppName} — Agent 动态应用`);
+                ActionDispatcher.registerCapabilitiesForApp(safeAppName, parsedCapabilities);
+                await trackDynamicAppUpsertByAgent(fileName, 'agent_create_dynamic_app');
             }
         }
         content = content.replace(createAppRegex, '').trim();
+
+        // <delete_app name="AppName" />
+        // Agent-initiated deletion = soft-delete (trash). User must confirm permanent deletion.
+        const deleteAppRegex = /<delete_app\s+name="([^"]+)"\s*\/>/gi;
+        let deleteAppMatch;
+        while ((deleteAppMatch = deleteAppRegex.exec(content)) !== null) {
+            const appName = (deleteAppMatch[1] || '').trim();
+            const safeAppName = appName.replace(/[^a-zA-Z0-9_-]/g, '');
+            if (!safeAppName) continue;
+            const activeFile = `@agent_apps/${safeAppName}.tsx`;
+            const trashFile = `@agent_apps/.trash/${safeAppName}.tsx`;
+            let moved = false;
+
+            if (apiConfig && apiConfig.nativeWorkspacePath) {
+                try {
+                    const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+                    // Ensure trash directory exists
+                    await fsBridge.createFolder(apiConfig.nativeWorkspacePath, '@agent_apps/.trash', allowGlobal).catch(() => { });
+                    // Read active file content and write to trash location
+                    const fileContent = await fsBridge.readFile(apiConfig.nativeWorkspacePath, activeFile, allowGlobal);
+                    await fsBridge.writeFile(apiConfig.nativeWorkspacePath, trashFile, fileContent, allowGlobal);
+                    await fsBridge.deleteFile(apiConfig.nativeWorkspacePath, activeFile, allowGlobal);
+                    moved = true;
+                } catch (e) {
+                    console.error('Failed to move dynamic app to trash', e);
+                }
+            }
+
+            if (moved) {
+                AppRegistry.trashApp(safeAppName, { reason: 'agent_delete_dynamic_app', trashedBy: 'agent' });
+                ActionDispatcher.unregisterApp(safeAppName);
+                await trackWorkspaceDeleteByAgent(activeFile, 'agent_trash_dynamic_app_file');
+                await trackDynamicAppDeleteByAgent(activeFile, 'agent_trash_dynamic_app');
+                addToast(`${charName} 想删除 ${safeAppName}，已移入垃圾箱。可在「查手机 → 应用管理」中恢复或彻底删除。`, 'info');
+                await DB.saveMessage({
+                    charId, role: 'system', type: 'text',
+                    content: `[系统: ${charName} 已将动态应用 ${safeAppName} 移入垃圾箱，等待用户确认永久删除]`,
+                });
+                hasToolResult = true;
+                setTimeout(() => { window.dispatchEvent(new Event('agent_app_deployed')); }, 1000);
+            } else {
+                await DB.saveMessage({
+                    charId, role: 'system', type: 'text',
+                    content: `[Tool Error (delete_app ${safeAppName})]: 应用文件不存在或移入垃圾箱失败`,
+                });
+                hasToolResult = true;
+            }
+        }
+        content = content.replace(deleteAppRegex, '').trim();
 
         // <fs_write target="fileName">
         const fsWriteRegex = /<fs_write\s+target="([^"]+)">([\s\S]*?)<\/fs_write>/gi;
@@ -647,6 +839,17 @@ export const ChatParser = {
 
                 // Save to DB
                 await DB.saveWorkspaceFile(newFile);
+                await trackWorkspaceUpsertByAgent(fileName, 'agent_fs_write');
+                const dynamicAppWriteMatch = fileName
+                    .replace(/^\/+/, '')
+                    .match(/^@agent_apps\/([^/]+)\.tsx$/i);
+                if (dynamicAppWriteMatch) {
+                    const dynamicAppId = dynamicAppWriteMatch[1];
+                    const dynamicCaps = AppRegistry.getCapabilities(dynamicAppId);
+                    const nextCaps = dynamicCaps.length > 0 ? dynamicCaps : DEFAULT_DYNAMIC_APP_CAPABILITIES;
+                    ActionDispatcher.registerCapabilitiesForApp(dynamicAppId, nextCaps);
+                    await trackDynamicAppUpsertByAgent(fileName, 'agent_fs_write_dynamic_app');
+                }
 
                 // Sync to Physical Workspace
                 if (apiConfig && apiConfig.nativeWorkspacePath) {
@@ -708,25 +911,79 @@ export const ChatParser = {
         content = content.replace(fsReadRegex, '').trim();
 
         // <fs_delete file="fileName">
+        // If targeting an active dynamic app, redirect to trash (same policy as <delete_app>).
         const fsDeleteRegex = /<fs_delete\s+file="([^"]+)"\s*\/>/gi;
         let deleteMatch;
         while ((deleteMatch = fsDeleteRegex.exec(content)) !== null) {
             const fileName = deleteMatch[1].trim();
             if (fileName && apiConfig && apiConfig.nativeWorkspacePath) {
-                try {
-                    const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
-                    await fsBridge.deleteFile(apiConfig.nativeWorkspacePath, fileName, allowGlobal);
-                    const msg = `[Tool Result (fs_delete ${fileName})]: Success`;
-                    await DB.saveMessage({ charId, role: 'system', type: 'text', content: msg });
-                    hasToolResult = true;
-                    hasFileMutation = true;
-                } catch (e: any) {
-                    await DB.saveMessage({ charId, role: 'system', type: 'text', content: `[Tool Error (fs_delete ${fileName})]: ${e.message}` });
-                    hasToolResult = true;
+                const dynamicAppDeleteMatch = fileName
+                    .replace(/^\/+/, '')
+                    .match(/^@agent_apps\/([^/\.][^/]*)\.tsx$/i);
+
+                if (dynamicAppDeleteMatch) {
+                    // Dynamic app file — redirect to trash, not physical delete
+                    const dynamicAppId = dynamicAppDeleteMatch[1];
+                    const trashFile = `@agent_apps/.trash/${dynamicAppId}.tsx`;
+                    try {
+                        const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+                        await fsBridge.createFolder(apiConfig.nativeWorkspacePath, '@agent_apps/.trash', allowGlobal).catch(() => { });
+                        const fileContent = await fsBridge.readFile(apiConfig.nativeWorkspacePath, fileName, allowGlobal);
+                        await fsBridge.writeFile(apiConfig.nativeWorkspacePath, trashFile, fileContent, allowGlobal);
+                        await fsBridge.deleteFile(apiConfig.nativeWorkspacePath, fileName, allowGlobal);
+                        AppRegistry.trashApp(dynamicAppId, { reason: 'agent_fs_delete_dynamic_app', trashedBy: 'agent' });
+                        ActionDispatcher.unregisterApp(dynamicAppId);
+                        await trackDynamicAppDeleteByAgent(fileName, 'agent_fs_trash_dynamic_app');
+                        addToast(`${charName} 想删除 ${dynamicAppId}，已移入垃圾箱。可在「查手机 → 应用管理」中恢复或彻底删除。`, 'info');
+                        await DB.saveMessage({ charId, role: 'system', type: 'text', content: `[系统: ${charName} 已将动态应用 ${dynamicAppId} 移入垃圾箱]` });
+                        hasToolResult = true;
+                        hasFileMutation = true;
+                        setTimeout(() => { window.dispatchEvent(new Event('agent_app_deployed')); }, 1000);
+                    } catch (e: any) {
+                        await DB.saveMessage({ charId, role: 'system', type: 'text', content: `[Tool Error (fs_delete ${fileName})]: ${e.message}` });
+                        hasToolResult = true;
+                    }
+                } else {
+                    // Normal file — physical delete as before
+                    try {
+                        const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+                        await fsBridge.deleteFile(apiConfig.nativeWorkspacePath, fileName, allowGlobal);
+                        await DB.saveMessage({ charId, role: 'system', type: 'text', content: `[Tool Result (fs_delete ${fileName})]: Success` });
+                        hasToolResult = true;
+                        hasFileMutation = true;
+                        await trackWorkspaceDeleteByAgent(fileName, 'agent_fs_delete');
+                    } catch (e: any) {
+                        await DB.saveMessage({ charId, role: 'system', type: 'text', content: `[Tool Error (fs_delete ${fileName})]: ${e.message}` });
+                        hasToolResult = true;
+                    }
                 }
             }
         }
         content = content.replace(fsDeleteRegex, '').trim();
+
+        // <fs_move from="oldPath" to="newPath" />
+        const fsMoveRegex = /<fs_move\s+from="([^"]+)"\s+to="([^"]+)"\s*\/>/gi;
+        let moveMatch;
+        while ((moveMatch = fsMoveRegex.exec(content)) !== null) {
+            const fromPath = moveMatch[1].trim();
+            const toPath = moveMatch[2].trim();
+            if (fromPath && toPath && apiConfig && apiConfig.nativeWorkspacePath) {
+                try {
+                    const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+                    await fsBridge.renameFile(apiConfig.nativeWorkspacePath, fromPath, toPath, allowGlobal);
+                    await trackWorkspaceMoveByAgent(fromPath, toPath, 'agent_fs_move');
+                    await reconcileDynamicAppMoveByAgent(fromPath, toPath);
+                    const msg = `[Tool Result (fs_move ${fromPath} -> ${toPath})]: Success`;
+                    await DB.saveMessage({ charId, role: 'system', type: 'text', content: msg });
+                    hasToolResult = true;
+                    hasFileMutation = true;
+                } catch (e: any) {
+                    await DB.saveMessage({ charId, role: 'system', type: 'text', content: `[Tool Error (fs_move ${fromPath} -> ${toPath})]: ${e.message}` });
+                    hasToolResult = true;
+                }
+            }
+        }
+        content = content.replace(fsMoveRegex, '').trim();
 
         // <fs_execute file="fileName">
         const fsExecuteRegex = /<fs_execute\s+file="([^"]+)"\s*\/>/gi;
@@ -754,8 +1011,9 @@ export const ChatParser = {
         }
         content = content.replace(fsExecuteRegex, '').trim();
 
-        // RECALL tag removal (handling done in main loop logic, but cleaning here just in case)
+        // RECALL / MEMORY_SEARCH tag removal (handling done in main loop logic, but cleaning here just in case)
         content = content.replace(/\[\[RECALL:.*?\]\]/g, '').trim();
+        content = content.replace(/\[\[MEMORY_SEARCH:[\s\S]*?\]\]/g, '').trim();
 
         // <语音> tag handling
         // Voice must be natural language only; strip stickers/URLs/tags from voice content.
@@ -839,8 +1097,8 @@ export const ChatParser = {
             // Strip simulated thinking time markers like [1s], [2.5s], [300ms]
             .replace(/\[\s*\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|second|seconds|毫秒|秒)\s*\]\s*/gi, '')
             // Strip bracketed tool calls like [fs_read file="..."]
-            .replace(/^\s*\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_execute)[^\]]*\]\s*$/gmi, '')
-            .replace(/\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_execute)[^\]]*\]/gi, '')
+            .replace(/^\s*\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_move|fs_execute)[^\]]*\]\s*$/gmi, '')
+            .replace(/\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_move|fs_execute)[^\]]*\]/gi, '')
             // 2026-02-11 13:52 format (unbracketed, at line start)
             .replace(/^\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*/gm, '')
             .replace(/\(\s*\d{1,2}:\d{2}(?::\d{2})?\s*\)/g, '')
@@ -854,7 +1112,8 @@ export const ChatParser = {
             // Strip residual action/system tags that weren't caught earlier
             .replace(/<fs_write\s+target="[^"]+">[\s\S]*?<\/fs_write>/gi, '')
             .replace(/<fs_(?:ls|read|delete|execute)\s+(?:dir|file)="[^"]+"\s*\/>/gi, '')
-            .replace(/\[\[(?:ACTION|RECALL|SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END)[:\s][\s\S]*?\]\]/g, '')
+            .replace(/<fs_move\s+from="[^"]+"\s+to="[^"]+"\s*\/>/gi, '')
+            .replace(/\[\[(?:ACTION|RECALL|SEARCH|MEMORY_SEARCH|DIARY|READ_DIARY|FS_DIARY|FS_READ_DIARY|DIARY_START|DIARY_END|FS_DIARY_START|FS_DIARY_END)[:\s][\s\S]*?\]\]/g, '')
             .replace(/\[schedule_message[^\]]*\]/g, '')
             .replace(/\[\[(?:QU[OA]TE|引用)[：:][\s\S]*?\]\]/g, '')
             .replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, '')
@@ -899,8 +1158,9 @@ export const ChatParser = {
             .replace(/(^|\s)`(\s|$)/gm, '$1$2')
             .replace(/<fs_write\s+target="[^"]+">[\s\S]*?<\/fs_write>/gi, '')
             .replace(/<fs_(?:ls|read|delete|execute)\s+(?:dir|file)="[^"]+"\s*\/>/gi, '')
-            .replace(/^\s*\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_execute)[^\]]*\]\s*$/gmi, '')
-            .replace(/\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_execute)[^\]]*\]/gi, '')
+            .replace(/<fs_move\s+from="[^"]+"\s+to="[^"]+"\s*\/>/gi, '')
+            .replace(/^\s*\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_move|fs_execute)[^\]]*\]\s*$/gmi, '')
+            .replace(/\[(?:fs_read|fs_write|fs_ls|fs_delete|fs_move|fs_execute)[^\]]*\]/gi, '')
             .replace(/\[\[[\s\S]*?\]\]/g, '')
             .replace(/\[(?:QU[OA]TE|引用)[：:][^\]]*\]/g, '')
             .replace(/\[回复\s*[""\u201C][^""\u201D]*?[""\u201D](?:\.{0,3})\]\s*[：:]?\s*/g, '')

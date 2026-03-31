@@ -165,6 +165,42 @@ export interface APIConfig {
     minimaxGroupId?: string;
     fishSpeechBaseUrl?: string;
     fishSpeechApiKey?: string;
+    l3SummaryConfig?: L3SummaryConfig;
+}
+
+export interface L3SummaryConfig {
+    /** Master toggle — set false to disable all L3 auto-generation */
+    enabled: boolean;
+    /**
+     * Base hour (0–23) for the summary pipeline trigger (default: 2).
+     * Daily fires every day; weekly fires on Monday; monthly fires on the 1st.
+     * All three use this same time — the pipeline decides what to generate.
+     */
+    baseHour: number;
+    /** Base minute (0–59) (default: 0) */
+    baseMinute: number;
+    /** Dual-model: separate API Source for summarization */
+    summaryApiSource?: ApiSource;
+    /** Dual-model: separate API base URL for summarization (falls back to main apiConfig if unset) */
+    summaryBaseUrl?: string;
+    /** Dual-model: separate API key for summarization */
+    summaryApiKey?: string;
+    /** Dual-model: lightweight model for daily summarization */
+    summaryModel?: string;
+    /** Dual-model: stronger model for weekly/monthly (falls back to summaryModel if unset) */
+    summaryModelStrong?: string;
+}
+
+/** Audit record appended to memory/summaries/proposals/PROPOSAL_ID.audit.json on every action */
+export interface L3ProposalAuditRecord {
+    id: string;                    // unique audit event id
+    proposalId: string;            // the CoreProposal id
+    action: 'approved' | 'rejected' | 'edited' | 'reverted';
+    category: CoreProposalCategory;
+    proposalText: string;          // text at time of action (post-edit if action=edited)
+    reason: string;
+    timestamp: number;             // ms epoch
+    actorNote?: string;            // optional user annotation
 }
 
 export interface VideoUnderstandingConfig {
@@ -197,6 +233,415 @@ export interface MemoryFragment {
     mood?: string;
 }
 
+// --- Memory L2: Session Archive (raw + clean) ---
+
+export type L2RawEventType =
+    | 'user_message'
+    | 'assistant_message'
+    | 'system_message'
+    | 'tool_event'
+    | 'user_action'
+    /** An askAgent() call originating from a dynamic App (prompt + response pair). */
+    | 'app_interaction'
+    /** Agent executed an action tag (call init, voice switch, nickname change, etc.). */
+    | 'agent_decision';
+
+/**
+ * Why this event was generated — causal context.
+ * source:
+ *   'chat'       — user typed/sent something in the Chat app
+ *   'call'       — phone call turn
+ *   'heartbeat'  — periodic silent agent heartbeat
+ *   'cron'       — scheduled cron job fired
+ *   'app'        — interaction in a non-chat app (button, tool, etc.)
+ *   'system'     — internal system event (session lifecycle, etc.)
+ */
+export interface L2RawTrigger {
+    source: 'chat' | 'call' | 'heartbeat' | 'cron' | 'app' | 'system';
+    reason?: string;        // e.g. 'user_message', 'reply', 'interaction:戳一戳', 'cron:daily_archival'
+    appId?: string;         // which app triggered this (for source='app')
+    triggerMsgId?: number;  // the message id that caused an agent reply
+}
+
+export interface L2RawEvent {
+    id: string;
+    ts: number;
+    isoTime: string;
+    charId: string;
+    dayKey: string;
+    sessionId: string;
+    part: number;
+    type: L2RawEventType;
+    role?: 'user' | 'assistant' | 'system';
+    messageId?: number;
+    messageType?: MessageType;
+    content?: string;
+    metadata?: Record<string, unknown>;
+    toolName?: string;
+    toolStatus?: 'ok' | 'error' | 'unknown';
+    /** Causal context: why was this event generated? */
+    trigger?: L2RawTrigger;
+}
+
+export interface L2SessionManifestEntry {
+    sessionId: string;
+    part: number;
+    rawFile: string;
+    cleanFile: string;
+    startedAt: number;
+    endedAt: number;
+    eventCount: number;
+    updatedAt: number;
+    continuedFrom?: { dayKey: string; part: number };
+    continuedTo?: { dayKey: string; part: number };
+}
+
+export interface L2DayManifest {
+    version: number;
+    dayKey: string;
+    updatedAt: number;
+    parts: L2SessionManifestEntry[];
+}
+
+export interface L2CleanMessage {
+    role: 'user' | 'assistant';
+    /** Full message text — no truncation. */
+    text: string;
+    ts: number;
+}
+
+/** A tool call that occurred within a session segment, including its result. */
+export interface L2CleanToolCall {
+    /** HH:mm of the event */
+    time: string;
+    ts: number;
+    toolName: string;
+    status: 'ok' | 'error' | 'unknown';
+    /** Brief description of input (≤200 chars) */
+    inputSummary?: string;
+    /** Brief description of output/result (≤200 chars) */
+    outputSummary?: string;
+}
+
+/**
+ * A single agent action entry — one human-readable sentence describing what the agent
+ * did (tool call / decision / dynamic-app interaction) at a given time.
+ * Stored in L2CleanSession.agentActions and surfaced to L3 as a narrative timeline.
+ */
+export interface L2CleanAgentAction {
+    /** HH:mm of the event */
+    time: string;
+    ts: number;
+    type: 'tool_call' | 'decision' | 'app_interaction';
+    /** One-sentence natural-language description. */
+    narrative: string;
+    /** For tool_call events */
+    toolName?: string;
+    /** For app_interaction events */
+    appId?: string;
+    status?: 'ok' | 'error' | 'unknown';
+    /** Brief summary of the action outcome (≤200 chars) */
+    resultSummary?: string;
+}
+
+export interface L2CleanSegment {
+    segmentId: string;
+    startAt: number;
+    endAt: number;
+    /** Full conversation exchanges in this segment — no truncation. */
+    messages: L2CleanMessage[];
+    /** Tool calls with results that occurred in this segment. */
+    toolCalls: L2CleanToolCall[];
+}
+
+export interface L2CleanSession {
+    version: number;
+    dayKey: string;
+    sessionId: string;
+    part: number;
+    generatedAt: number;
+    startAt: number;
+    endAt: number;
+    /** Primary source of this session's events: 'chat' | 'call' | 'heartbeat' | 'cron' | 'mixed'. */
+    source?: 'chat' | 'call' | 'heartbeat' | 'cron' | 'mixed';
+    /** Human-readable label for memory recall, e.g. "用户打给agent的通话", "文字聊天" */
+    sourceLabel?: string;
+    /** Present only when source === 'call'. */
+    callMeta?: {
+        /** Who initiated: 'user_to_agent' (user dialed) or 'agent_to_user' (agent initiated). */
+        direction: 'user_to_agent' | 'agent_to_user';
+        /** Call session identifier from the call manager. */
+        callSessionId?: string;
+    };
+    stats: {
+        eventCount: number;
+        userMessages: number;
+        assistantMessages: number;
+        toolEvents: number;
+        agentDecisions: number;
+        appInteractions: number;
+    };
+    segments: L2CleanSegment[];
+    /** Narrative timeline of tool calls, agent decisions, and app interactions. */
+    agentActions?: L2CleanAgentAction[];
+}
+
+// --- Behavior Index (Event Perception -> Daily Index) ---
+
+export type UsageAction =
+    | 'app_open'
+    | 'app_close'
+    | 'app_switch'
+    | 'view'
+    | 'write'
+    | 'update'
+    | 'delete'
+    | 'complete'
+    | 'send'
+    | 'search'
+    | 'custom';
+
+export interface UsageEvent {
+    id: string;
+    ts: number;
+    isoTime: string;
+    dayKey: string;
+    appId: string;
+    action: UsageAction;
+    detail?: string;
+    refType?: string;
+    refId?: string;
+    dwellMs?: number;
+    importance?: number;
+    source?: 'system' | 'event_bus' | 'agent' | 'user';
+}
+
+export interface BehaviorDayIndex {
+    version: number;
+    dayKey: string;
+    updatedAt: number;
+    totalEvents: number;
+    appOpenCount: Record<string, number>;
+    totalDwellMsByApp: Record<string, number>;
+    actionCountByApp: Record<string, Record<string, number>>;
+    highValueRefs: Array<{
+        appId: string;
+        refType: string;
+        refId: string;
+        lastTs: number;
+        score: number;
+    }>;
+}
+
+export interface ToolAuditRecord {
+    id: string;
+    ts: number;
+    action: string;
+    status: 'ok' | 'error';
+    appId?: string;
+    refType?: string;
+    refId?: string;
+    detail?: string;
+}
+
+// --- Memory L3 Summary Artifacts (daily / weekly / monthly) ---
+
+// Key formats:
+// - DayKey: YYYY-MM-DD
+// - WeekKey: YYYY-Www (ISO week)
+// - MonthKey: YYYY-MM
+// - YearKey: YYYY
+export type DayKey = string;
+export type WeekKey = string;
+export type MonthKey = string;
+export type YearKey = string;
+
+export type MemorySummaryLevel = 'daily' | 'weekly' | 'monthly' | 'yearly';
+
+export interface L3SummaryRange {
+    startedAt: number;
+    endedAt: number;
+}
+
+export interface L3SourcePointer {
+    kind: 'l2_raw' | 'l2_clean' | 'behavior_events' | 'behavior_index';
+    path: string;
+    dayKey?: DayKey;
+    sessionId?: string;
+    part?: number;
+}
+
+export interface L3DynamicLayerSnapshot {
+    currentState: string[];
+    purposeContext: string[];
+    onTheHorizon: string[];
+    others: string[];
+}
+
+export type CoreProposalCategory = 'about_agent' | 'user_profile' | 'relationship_core';
+
+export interface L3CoreProposalDraft {
+    id: string;
+    category: CoreProposalCategory;
+    proposal: string;
+    reason: string;
+    confidence?: number; // 0~1 heuristic score from summarizer
+    status: 'pending' | 'approved' | 'rejected';
+}
+
+export interface L3SummaryStats {
+    l2SessionParts: number;
+    messageEvents: number;
+    toolEvents: number;
+    userActions: number;
+    usageEvents: number;
+    activeApps: string[];
+    totalDwellMs: number;
+}
+
+export interface L3SearchRef {
+    appId: string;
+    refType: string;
+    refId: string;
+    score: number;
+    lastTs: number;
+}
+
+export interface L3SearchIndex {
+    keywords: string[];
+    refs: L3SearchRef[];
+}
+
+export interface L3DailySummary {
+    version: number;
+    level: 'daily';
+    dayKey: DayKey;
+    createdAt: number;
+    updatedAt: number;
+    range: L3SummaryRange;
+    stats: L3SummaryStats;
+    highlights: string[];
+    dynamicLayer: L3DynamicLayerSnapshot;
+    coreProposalDrafts: L3CoreProposalDraft[];
+    searchIndex: L3SearchIndex;
+    sourceFiles: L3SourcePointer[];
+}
+
+export interface L3WeeklySummary {
+    version: number;
+    level: 'weekly';
+    weekKey: WeekKey;
+    createdAt: number;
+    updatedAt: number;
+    range: L3SummaryRange;
+    sourceDays: DayKey[];
+    sourceDailyFiles: string[];
+    highlights: string[];
+    trendNotes: string[];
+    dynamicLayer: L3DynamicLayerSnapshot;
+    coreProposalDrafts: L3CoreProposalDraft[];
+    searchIndex: L3SearchIndex;
+}
+
+export interface L3MonthlySummary {
+    version: number;
+    level: 'monthly';
+    monthKey: MonthKey;
+    createdAt: number;
+    updatedAt: number;
+    range: L3SummaryRange;
+    sourceDays: DayKey[];
+    sourceWeeks: WeekKey[];
+    sourceWeeklyFiles: string[];
+    highlights: string[];
+    stablePatterns: string[];
+    dynamicLayer: L3DynamicLayerSnapshot;
+    coreProposalDrafts: L3CoreProposalDraft[];
+    searchIndex: L3SearchIndex;
+}
+
+export interface L3YearlySummary {
+    version: number;
+    level: 'yearly';
+    yearKey: YearKey;                       // e.g. "2025"
+    createdAt: number;
+    updatedAt: number;
+    range: L3SummaryRange;
+    sourceMonths: MonthKey[];
+    sourceMonthlyFiles: string[];
+    highlights: string[];                   // Most memorable moments / milestones of the year
+    milestones: string[];                   // Turning points, achievements, important changes
+    stablePatterns: string[];               // Long-term stable traits/behaviors observed this year
+    relationshipNotes: string[];            // How the relationship evolved over the year
+    dynamicLayer: L3DynamicLayerSnapshot;
+    coreProposalDrafts: L3CoreProposalDraft[];
+    searchIndex: L3SearchIndex;
+}
+
+export type L3Summary = L3DailySummary | L3WeeklySummary | L3MonthlySummary | L3YearlySummary;
+
+export interface L3CatalogItem {
+    key: DayKey | WeekKey | MonthKey | YearKey;
+    file: string;
+    level: MemorySummaryLevel;
+    createdAt: number;
+    updatedAt: number;
+}
+
+export interface L3SummaryCatalog {
+    version: number;
+    updatedAt: number;
+    daily: L3CatalogItem[];
+    weekly: L3CatalogItem[];
+    monthly: L3CatalogItem[];
+    yearly: L3CatalogItem[];
+}
+
+/**
+ * Inverted keyword index: keyword → sorted-descending array of dayKeys.
+ * Lives at memory/summaries/indexes/keyword_index.json.
+ * Built incrementally as daily summaries are generated.
+ */
+export interface L3KeywordIndex {
+    version: number;
+    updatedAt: number;
+    /** keyword → dayKeys that contain it, newest first */
+    index: Record<string, string[]>;
+}
+
+// --- Memory L4: Profiles (dynamic evolution buffer before stable core) ---
+
+/**
+ * A single "active observation" living in the profiles/ buffer.
+ * Entries accumulate approval counts from repeated L3b proposal approvals.
+ * Once approvalCount reaches the promotion threshold they are written to the
+ * stable core files (USER.md / Agent_Soul.md / MEMORY.md) and marked promoted.
+ */
+export interface L4ProfileEntry {
+    id: string;
+    category: CoreProposalCategory;
+    content: string;
+    reason: string;
+    /** first 50 chars of content.toLowerCase() — used for deduplication */
+    fingerprint: string;
+    /** proposal ids that contributed to this entry (tracks provenance) */
+    sourceProposalIds: string[];
+    firstApprovedAt: number;
+    lastApprovedAt: number;
+    /** how many distinct approvals this observation has received */
+    approvalCount: number;
+    /** true once written to stable core (USER.md / Agent_Soul.md / MEMORY.md) */
+    promoted: boolean;
+    promotedAt?: number;
+}
+
+export interface L4ProfileFile {
+    version: number;
+    category: CoreProposalCategory;
+    updatedAt: number;
+    entries: L4ProfileEntry[];
+}
+
 // --- Memory L3: Dynamic Layer (auto-updated daily) ---
 
 export interface DynamicMemory {
@@ -211,7 +656,7 @@ export interface DynamicMemory {
 
 export interface CoreProposal {
     id: string;
-    category: 'about_nova' | 'user_profile' | 'relationship_core';
+    category: CoreProposalCategory;
     proposal: string;
     reason: string;
     status: 'pending' | 'approved' | 'rejected';
@@ -305,6 +750,8 @@ export interface AgentProfile {
     activeMemoryMonths?: string[];
     dynamicMemories?: DynamicMemory[];      // L3a dynamic layer
     coreProposals?: CoreProposal[];         // L3b core proposals awaiting approval
+    l3SummaryBlurb?: string;               // L3 cached context: today+yesterday daily + latest weekly + monthly highlights
+    profilesBlurb?: string;                // L4 active observations from profiles/ buffer (not yet promoted to stable core)
     impression?: UserImpression;            // AI's psychological profile of user
     heartbeat?: HeartbeatConfig;            // Heartbeat configuration
     bubbleStyle?: string;                   // Theme linked to this agent

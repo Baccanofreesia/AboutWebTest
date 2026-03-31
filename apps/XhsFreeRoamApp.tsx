@@ -37,6 +37,10 @@ const XhsFreeRoamApp: React.FC = () => {
     const [showCharPicker, setShowCharPicker] = useState(false);
 
     const char = characters.find(c => c.id === selectedCharId) || null;
+    const safeTopInset = 'env(safe-area-inset-top, 0px)';
+    const headerTopPadding = `calc(${safeTopInset} + 2.7rem)`;
+    const pickerTopOffset = `calc(${safeTopInset} + 5.1rem)`;
+    const resolveCharAvatar = (profile?: CharacterProfile | null) => profile?.displayAvatar || profile?.avatar || '';
 
     const [activities, setActivities] = useState<XhsActivityRecord[]>([]);
     const [isRunning, setIsRunning] = useState(false);
@@ -45,6 +49,7 @@ const XhsFreeRoamApp: React.FC = () => {
     const [liveActivities, setLiveActivities] = useState<XhsActivityRecord[]>([]);
     const [mcpStatus, setMcpStatus] = useState<'unknown' | 'connected' | 'error'>('unknown');
     const [showDetail, setShowDetail] = useState<XhsActivityRecord | null>(null);
+    const [canStartFreeRoam, setCanStartFreeRoam] = useState(false);
     const [confirmDialog, setConfirmDialog] = useState<{
         isOpen: boolean; title: string; message: string;
         variant: 'danger' | 'warning' | 'info'; onConfirm: () => void;
@@ -76,8 +81,15 @@ const XhsFreeRoamApp: React.FC = () => {
         }).catch(() => setMcpStatus('error'));
     }, [mcpEnabled, mcpUrl]);
 
+    useEffect(() => {
+        const timer = setTimeout(() => setCanStartFreeRoam(true), 350);
+        return () => {
+            clearTimeout(timer);
+        };
+    }, []);
+
     const handleStart = async () => {
-        if (!char || isRunning) return;
+        if (!char || isRunning || !canStartFreeRoam) return;
         if (!mcpEnabled || !mcpUrl) {
             addToast('请先在设置中配置小红书 MCP Server', 'error');
             return;
@@ -152,7 +164,11 @@ const XhsFreeRoamApp: React.FC = () => {
         if (!showCharPicker) return null;
         return (
             <div className="fixed inset-0 z-50 bg-black/30" onClick={() => setShowCharPicker(false)}>
-                <div className="absolute top-14 left-4 right-4 bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden animate-fade-in" onClick={e => e.stopPropagation()}>
+                <div
+                    className="absolute left-4 right-4 bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden animate-fade-in"
+                    style={{ top: pickerTopOffset }}
+                    onClick={e => e.stopPropagation()}
+                >
                     <div className="p-3 border-b border-slate-50">
                         <p className="text-xs font-bold text-slate-400">选择角色</p>
                     </div>
@@ -164,8 +180,8 @@ const XhsFreeRoamApp: React.FC = () => {
                                 className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors
                                     ${c.id === selectedCharId ? 'bg-rose-50' : 'active:bg-slate-50'}`}
                             >
-                                {c.avatar ? (
-                                    <img src={c.avatar} className="w-8 h-8 rounded-full object-cover" alt="" />
+                                {resolveCharAvatar(c) ? (
+                                    <img src={resolveCharAvatar(c)} className="w-8 h-8 rounded-full object-cover" alt="" />
                                 ) : (
                                     <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-xs font-bold text-slate-500">{c.name[0]}</div>
                                 )}
@@ -187,7 +203,7 @@ const XhsFreeRoamApp: React.FC = () => {
     if (characters.length === 0) {
         return (
             <div className="h-full flex flex-col bg-gradient-to-b from-rose-50 to-white">
-                <div className="flex items-center px-4 py-3 border-b border-slate-100">
+                <div className="flex items-center px-4 pb-3 border-b border-slate-100" style={{ paddingTop: headerTopPadding }}>
                     <button onClick={closeApp} className="w-8 h-8 flex items-center justify-center text-slate-400 active:scale-90">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                     </button>
@@ -320,7 +336,7 @@ const XhsFreeRoamApp: React.FC = () => {
             {thinking && char && (
                 <div className="bg-violet-50 rounded-2xl p-3 animate-fade-in">
                     <div className="flex items-center gap-1.5 mb-1">
-                        {char.avatar && <img src={char.avatar} className="w-5 h-5 rounded-full object-cover" alt="" />}
+                        {resolveCharAvatar(char) && <img src={resolveCharAvatar(char)} className="w-5 h-5 rounded-full object-cover" alt="" />}
                         <span className="text-[10px] font-bold text-violet-400">{char.name}在想...</span>
                     </div>
                     <p className="text-xs text-violet-700 leading-relaxed italic">"{thinking}"</p>
@@ -429,7 +445,7 @@ const XhsFreeRoamApp: React.FC = () => {
 
     return (
         <div className="h-full flex flex-col bg-gradient-to-b from-rose-50 to-white">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 shrink-0">
+            <div className="flex items-center justify-between px-4 pb-3 border-b border-slate-100 shrink-0" style={{ paddingTop: headerTopPadding }}>
                 <div className="flex items-center gap-2">
                     <button onClick={closeApp} className="w-8 h-8 flex items-center justify-center text-slate-400 active:scale-90">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
@@ -439,8 +455,8 @@ const XhsFreeRoamApp: React.FC = () => {
                         className="flex items-center gap-2 active:opacity-70 transition-opacity"
                         disabled={isRunning}
                     >
-                        {char?.avatar ? (
-                            <img src={char.avatar} className="w-7 h-7 rounded-full object-cover border-2 border-rose-200" alt="" />
+                        {resolveCharAvatar(char) ? (
+                            <img src={resolveCharAvatar(char)} className="w-7 h-7 rounded-full object-cover border-2 border-rose-200" alt="" />
                         ) : (
                             <div className="w-7 h-7 rounded-full bg-rose-100 flex items-center justify-center text-xs font-bold text-rose-500 border-2 border-rose-200">
                                 {char?.name?.[0] || '?'}
@@ -482,11 +498,11 @@ const XhsFreeRoamApp: React.FC = () => {
             <div className="shrink-0 px-4 pb-5 pt-3 border-t border-slate-100 bg-white/80 backdrop-blur-sm">
                 <button
                     onClick={handleStart}
-                    disabled={isRunning || !mcpEnabled || !char}
+                    disabled={isRunning || !mcpEnabled || !char || !canStartFreeRoam}
                     className={`w-full py-3.5 rounded-2xl font-bold text-sm shadow-lg transition-all active:scale-[0.97]
                         ${isRunning
                             ? 'bg-slate-100 text-slate-400 shadow-none cursor-wait'
-                            : (!mcpEnabled || !char)
+                            : (!mcpEnabled || !char || !canStartFreeRoam)
                                 ? 'bg-slate-100 text-slate-300 shadow-none cursor-not-allowed'
                                 : 'bg-gradient-to-r from-rose-400 to-red-500 text-white shadow-rose-200'
                         }`}

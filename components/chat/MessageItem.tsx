@@ -24,6 +24,7 @@ interface MessageItemProps {
     allowGlobal?: boolean;
     onUpdateMessage?: (msgId: number, metadata: any) => void;
     onDirectDelete?: (msg: Message) => void;
+    onReplyJump?: (msgId: number) => void;
 }
 
 interface LinkPreviewData {
@@ -34,10 +35,11 @@ interface LinkPreviewData {
     siteName?: string;
 }
 
-const URL_REGEX = /https?:\/\/[^\s<>"'）)\]]+/gi;
+const URL_REGEX = /https?:\/\/[^\s<>"'`，。！？；：、）》】]+/gi;
 const linkPreviewCache = new Map<string, LinkPreviewData | null>();
+const localImageDataUrlCache = new Map<string, string>();
 
-const normalizeUrlToken = (token: string) => token.replace(/[.,!?;:]+$/g, '').trim();
+const normalizeUrlToken = (token: string) => token.replace(/[.,!?;:，。！？；：、）》】]+$/g, '').trim();
 const extractUrls = (text: string): string[] => {
     const matches = text.match(URL_REGEX) || [];
     const list = matches.map(normalizeUrlToken).filter(Boolean);
@@ -46,6 +48,17 @@ const extractUrls = (text: string): string[] => {
 
 const hostOf = (url: string) => {
     try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+};
+
+const buildXhsNoteUrl = (note: any): string => {
+    const rawUrl = (note?.url || note?.noteUrl || note?.link || '').toString().trim();
+    if (rawUrl) return normalizeUrlToken(rawUrl);
+    const noteId = (note?.noteId || '').toString().trim();
+    if (!noteId) return '';
+    const token = (note?.xsecToken || '').toString().trim();
+    return token
+        ? `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${encodeURIComponent(token)}`
+        : `https://www.xiaohongshu.com/explore/${noteId}`;
 };
 
 const fetchLinkPreview = async (url: string): Promise<LinkPreviewData | null> => {
@@ -70,6 +83,70 @@ const fetchLinkPreview = async (url: string): Promise<LinkPreviewData | null> =>
     } catch { }
     return null;
 };
+
+const useLocalImageDataUrl = (url: string, workspaceRootPath: string, allowGlobal: boolean) => {
+    const isLocal = url.startsWith('local://');
+    const cacheKey = `${workspaceRootPath}::${url}`;
+    const [dataUrl, setDataUrl] = useState<string>(() => {
+        if (!isLocal) return '';
+        return localImageDataUrlCache.get(cacheKey) || '';
+    });
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!isLocal || !workspaceRootPath) {
+            setDataUrl('');
+            return () => { cancelled = true; };
+        }
+
+        const cached = localImageDataUrlCache.get(cacheKey);
+        if (cached) {
+            setDataUrl(cached);
+            return () => { cancelled = true; };
+        }
+
+        const relPath = url.replace('local://', '');
+        fsBridge.readFileBase64(workspaceRootPath, relPath, allowGlobal)
+            .then(base64 => {
+                if (cancelled) return;
+                const ext = relPath.split('.').pop()?.toLowerCase() || 'png';
+                const mime = ext === 'gif'
+                    ? 'image/gif'
+                    : ext === 'webp'
+                        ? 'image/webp'
+                        : ext === 'jpg' || ext === 'jpeg'
+                            ? 'image/jpeg'
+                            : 'image/png';
+                const next = `data:${mime};base64,${base64}`;
+                localImageDataUrlCache.set(cacheKey, next);
+                setDataUrl(next);
+            })
+            .catch(() => {
+                if (!cancelled) setDataUrl('');
+            });
+
+        return () => { cancelled = true; };
+    }, [allowGlobal, cacheKey, isLocal, url, workspaceRootPath]);
+
+    return dataUrl;
+};
+
+const EmojiMessageImage = React.memo(({
+    url,
+    workspaceRootPath,
+    allowGlobal
+}: {
+    url: string;
+    workspaceRootPath: string;
+    allowGlobal: boolean;
+}) => {
+    const isLocal = url.startsWith('local://');
+    const localSrc = useLocalImageDataUrl(url, workspaceRootPath, allowGlobal);
+    const src = isLocal ? localSrc : url;
+
+    if (isLocal && !src) return <div className="w-16 h-16 bg-slate-100 rounded-xl" />;
+    return <img src={src} className="w-16 h-16 object-contain rounded-xl" alt="sticker" loading="lazy" decoding="async" />;
+});
 
 const VoiceMessageRenderer: React.FC<{
     m: Message;
@@ -140,6 +217,7 @@ const MessageItem = React.memo(({
     allowGlobal = false,
     onUpdateMessage,
     onDirectDelete,
+    onReplyJump,
 }: MessageItemProps) => {
     const isUser = m.role === 'user';
     const isSystem = m.role === 'system';
@@ -238,6 +316,7 @@ const MessageItem = React.memo(({
 
         const renderSystemWrapper = (content: React.ReactNode) => (
             <div
+                data-message-id={m.id}
                 className={`flex items-center w-full ${selectionMode ? 'pl-14' : ''} animate-fade-in relative transition-[padding] duration-300`}
                 onClick={(e) => {
                     if (selectionMode) {
@@ -335,7 +414,7 @@ const MessageItem = React.memo(({
     if (m.type === 'interaction') {
 
         return (
-            <div className={`flex flex-col items-center ${marginBottom} w-full animate-fade-in`}>
+            <div data-message-id={m.id} className={`flex flex-col items-center ${marginBottom} w-full animate-fade-in`}>
                 <div className="text-[10px] text-slate-400 mb-1 opacity-70">{formatTime(m.timestamp)}</div>
                 <div className="group relative cursor-pointer active:scale-95 transition-transform" {...interactionProps}>
                     <div className="text-[11px] text-slate-500 bg-slate-200/50 backdrop-blur-sm px-4 py-1.5 rounded-full flex items-center gap-1.5 border border-white/40 shadow-sm select-none">
@@ -348,25 +427,9 @@ const MessageItem = React.memo(({
             </div>
         );
     }
-    // MessageItem.tsx 里加这个 hook
-    const useLocalImage = (url: string, workspaceRootPath: string, allowGlobal: boolean) => {
-        const [dataUrl, setDataUrl] = useState<string>('');
-        useEffect(() => {
-            if (!url.startsWith('local://')) return;
-            const relPath = url.replace('local://', '');
-            fsBridge.readFileBase64(workspaceRootPath, relPath, allowGlobal)
-                .then(base64 => {
-                    const ext = relPath.split('.').pop()?.toLowerCase() || 'png';
-                    const mime = ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
-                    setDataUrl(`data:${mime};base64,${base64}`);
-                })
-                .catch(() => setDataUrl(''));
-        }, [url, workspaceRootPath, allowGlobal]);
-        return dataUrl;
-    };
-
     const commonLayout = (content: React.ReactNode) => (
         <div
+            data-message-id={m.id}
             className={`relative flex items-end ${isUser ? 'justify-end' : 'justify-start'} ${marginBottom} px-3 group select-none transition-all duration-200 ${selectionMode ? 'pl-14 bg-black/5 py-1.5' : ''}`}
             onClick={(e) => {
                 if (selectionMode) {
@@ -404,14 +467,13 @@ const MessageItem = React.memo(({
     }
 
     if (m.type === 'emoji') {
-        const isLocal = m.content.startsWith('local://');
-        const EmojiImg = ({ url }: { url: string }) => {
-            const localSrc = useLocalImage(url, workspaceRootPath, allowGlobal);
-            const src = isLocal ? localSrc : url;
-            if (isLocal && !localSrc) return <div className="w-16 h-16 bg-slate-100 rounded-xl animate-pulse" />;
-            return <img src={src} className="w-16 h-16 object-contain rounded-xl" alt="sticker" />;
-        };
-        return commonLayout(<EmojiImg url={m.content} />);
+        return commonLayout(
+            <EmojiMessageImage
+                url={m.content}
+                workspaceRootPath={workspaceRootPath}
+                allowGlobal={allowGlobal}
+            />
+        );
     }
     if (m.type === 'image') return commonLayout(<div className="relative group"><img src={m.content} className="max-w-[200px] max-h-[300px] rounded-2xl shadow-sm border border-black/5" alt="Uploaded" loading="lazy" decoding="async" /></div>);
     if (m.type === 'video') return commonLayout(
@@ -513,8 +575,17 @@ const MessageItem = React.memo(({
 
     if (m.type === 'xhs_card' && m.metadata?.xhsNote) {
         const note = m.metadata.xhsNote;
+        const noteUrl = buildXhsNoteUrl(note);
         return commonLayout(
-            <div className="w-64 bg-white rounded-xl overflow-hidden shadow-sm border border-slate-100 cursor-pointer active:opacity-90 transition-opacity">
+            <div
+                className={`w-64 bg-white rounded-xl overflow-hidden shadow-sm border border-slate-100 active:opacity-90 transition-opacity ${noteUrl ? 'cursor-pointer' : ''}`}
+                onClick={(e) => {
+                    if (!noteUrl) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    window.open(noteUrl, '_blank', 'noopener,noreferrer');
+                }}
+            >
                 {note.coverUrl ? (
                     <div className="relative w-full h-36 bg-slate-100 overflow-hidden">
                         <img
@@ -615,10 +686,11 @@ const MessageItem = React.memo(({
                 if (part) nodes.push(<span key={`${keyPrefix}-t-${i}`}>{part}</span>);
                 const url = urls[i];
                 if (url) {
+                    const normalizedUrl = normalizeUrlToken(url);
                     nodes.push(
                         <a
                             key={`${keyPrefix}-u-${i}`}
-                            href={url}
+                            href={normalizedUrl}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="underline underline-offset-2 text-blue-500 hover:text-blue-600"
@@ -626,7 +698,7 @@ const MessageItem = React.memo(({
                                 e.stopPropagation();
                             }}
                         >
-                            {url}
+                            {normalizedUrl}
                         </a>
                     );
                 }
@@ -737,7 +809,19 @@ const MessageItem = React.memo(({
                     className={`relative z-10 mb-2.5 pl-3 py-1.5 pr-2 border-l-[3.5px] rounded-r-lg flex flex-col gap-1 max-w-full overflow-hidden transition-colors ${isUser
                         ? 'border-white/40 bg-white/10 text-white/90'
                         : 'border-blue-500/50 bg-black/5 text-slate-600'
-                        }`}
+                        } ${onReplyJump && m.replyTo.id ? 'cursor-pointer hover:opacity-90' : ''}`}
+                    onClick={(e) => {
+                        if (!onReplyJump || !m.replyTo?.id) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onReplyJump(m.replyTo.id);
+                    }}
+                    onMouseDown={(e) => {
+                        if (onReplyJump && m.replyTo?.id) e.stopPropagation();
+                    }}
+                    onTouchStart={(e) => {
+                        if (onReplyJump && m.replyTo?.id) e.stopPropagation();
+                    }}
                 >
                     <div className="flex items-center gap-1.5 opacity-80">
                         <span className="font-bold text-[11px] tracking-wide uppercase">{m.replyTo.name}</span>
@@ -817,7 +901,8 @@ const MessageItem = React.memo(({
     prev.selectionMode === next.selectionMode &&
     prev.isSelected === next.isSelected &&
     prev.workspaceRootPath === next.workspaceRootPath &&
-    prev.allowGlobal === next.allowGlobal
+    prev.allowGlobal === next.allowGlobal &&
+    prev.onReplyJump === next.onReplyJump
 ));
 
 export default MessageItem;

@@ -1,4 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
+import { L2CaptureService, prepareContentForRaw, pickMetadataForRaw } from '../utils/l2CaptureService';
+import { rebuildL2CleanFromRaw } from '../utils/memoryClean';
 import { APIConfig, AppID, OSTheme, AgentProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, CallState, CallDirection, CallActions, CallBubble, CallInputMode } from '../types';
 import { DB } from '../utils/db';
 import { fsBridge } from '../utils/fsBridge';
@@ -6,6 +8,16 @@ import { RealtimeConfig, defaultRealtimeConfig } from '../utils/realtimeContext'
 import { ContextEnhancer } from '../utils/contextEnhancer';
 import { resolveApiEndpoint } from '../utils/apiResolver';
 import { parseAgentSoulMarkdown, buildAgentSystemPromptFromSoul, parseUserProfileMarkdown } from '../utils/profileFiles';
+import { usageTracker } from '../utils/usageTracker';
+import { ToolGateway } from '../utils/toolGateway';
+import { ActionDispatcher } from '../utils/actionDispatcher';
+import { runL3DailyPipeline, runL3Compensation, buildL3ContextBlurb, promoteL3Drafts, LLMSummaryCallConfig } from '../utils/memoryDaily';
+import { acquireSummaryLock } from '../utils/apiSemaphore';
+import { buildProfilesBlurb } from '../utils/memoryProfiles';
+import { migrateL2CleanToV2, migrateCleanLayoutToSessionsDir } from '../utils/memoryClean';
+import { appendL2RawEvent, ensureL2MemoryLayout } from '../utils/memoryArchive';
+import { resolveL2SessionState } from '../utils/memorySession';
+import { AppRegistry } from '../utils/appRegistry';
 
 // ============================================
 // NovaClaw OS Context — Single Agent Architecture
@@ -81,11 +93,11 @@ interface OSContextType {
     setCallMicActive: (val: boolean) => void;
     callVolumeLevel: number;
     setCallVolumeLevel: (val: number) => void;
-    
+
     // Cross-app call action registry
     callActionsRef: React.MutableRefObject<CallActions | null>;
     registerCallActions: (actions: CallActions) => void;
-    
+
     // Realtime Perception
     realtimeConfig: RealtimeConfig;
     updateRealtimeConfig: (updates: Partial<RealtimeConfig>) => void;
@@ -97,6 +109,16 @@ interface OSContextType {
 
     // Agent SDK
     askAgent: (prompt: string, systemContext?: string) => Promise<string>;
+    toolGateway: typeof ToolGateway;
+    dispatchAction: (actionTag: string, payload?: any, callerAppId?: string) => Promise<any>;
+    createAppToolClient: (appId: string) => {
+        invoke: (capability: string, payload?: any) => Promise<any>;
+        dispatchAction: (actionTag: string, payload?: any) => Promise<any>;
+        queryIndex: (payload?: any) => Promise<any>;
+        readRef: (payload: { refType: string; refId: string }) => Promise<any>;
+        search: (payload: { appId: string; query: string; limit?: number }) => Promise<any>;
+        resolveFile: (payload?: any) => Promise<any>;
+    };
 
     // ---- Legacy compatibility layer ----
     // These provide backward compatibility for existing apps that reference
@@ -153,7 +175,7 @@ const normalizeApiConfig = (config: APIConfig): APIConfig => ({
     webSpeechLanguage: config.webSpeechLanguage || 'zh-CN',
     webSpeechInterim: config.webSpeechInterim ?? true,
     webSpeechContinuous: config.webSpeechContinuous ?? true,
-    webSpeechMinVolume: normalizeWebSpeechMinDb(config.webSpeechMinVolume, -30),
+    webSpeechMinVolume: normalizeWebSpeechMinDb(config.webSpeechMinVolume, -45),
 });
 
 const defaultApiConfig: APIConfig = normalizeApiConfig({
@@ -170,7 +192,7 @@ const defaultApiConfig: APIConfig = normalizeApiConfig({
     webSpeechLanguage: 'zh-CN',
     webSpeechInterim: true,
     webSpeechContinuous: true,
-    webSpeechMinVolume: -30,
+    webSpeechMinVolume: -45,
 });
 
 const generateAvatar = (seed: string) => {
@@ -255,9 +277,53 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     const [callMicActive, setCallMicActive] = useState(false);
     const [callVolumeLevel, setCallVolumeLevel] = useState(0);
     const callActionsRef = useRef<CallActions | null>(null);
+    const trackerPrevAppRef = useRef<AppID | string | null>(null);
     const registerCallActions = useCallback((actions: CallActions) => {
         callActionsRef.current = actions;
     }, []);
+
+    useEffect(() => {
+        usageTracker.start();
+        return () => {
+            usageTracker.closeActiveApp('os_unmount');
+            usageTracker.stop();
+        };
+    }, []);
+
+    useEffect(() => {
+        usageTracker.configure({
+            rootPath: apiConfig.nativeWorkspacePath?.trim() || '',
+            allowGlobal: !!apiConfig.securityPolicy?.allowGlobalFileAccess,
+            flushIntervalMs: 3000,
+            flushMaxEvents: 12,
+            forceFlushMaxWaitMs: 10000,
+        });
+    }, [apiConfig.nativeWorkspacePath, apiConfig.securityPolicy?.allowGlobalFileAccess]);
+
+    useEffect(() => {
+        const rootPath = apiConfig.nativeWorkspacePath?.trim() || '';
+        const charId = agent?.id || '';
+        if (rootPath && charId) {
+            L2CaptureService.configure({
+                rootPath,
+                allowGlobal: !!apiConfig.securityPolicy?.allowGlobalFileAccess,
+                charId,
+            });
+        }
+    }, [agent?.id, apiConfig.nativeWorkspacePath, apiConfig.securityPolicy?.allowGlobalFileAccess]);
+
+    useEffect(() => {
+        const current = activeApp;
+        if (trackerPrevAppRef.current === null) {
+            usageTracker.transitionApp(String(current));
+            trackerPrevAppRef.current = current;
+            return;
+        }
+        if (trackerPrevAppRef.current !== current) {
+            usageTracker.transitionApp(String(current));
+        }
+        trackerPrevAppRef.current = current;
+    }, [activeApp]);
 
     // --- Initialization ---
     useEffect(() => {
@@ -384,7 +450,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                                 const systemPrompt = buildAgentSystemPromptFromSoul(soulData);
                                 const avatarPath = soulData.avatar || '';
                                 let displayAvatar = foundAgent.displayAvatar;
-                                if (avatarPath && !avatarPath.startsWith('data:') && !avatarPath.startsWith('http') && !avatarPath.startsWith('blob:')) {
+                                if (avatarPath === 'default') {
+                                    if (!displayAvatar) displayAvatar = generateAvatar(soulData.name || foundAgent.name || 'A');
+                                } else if (avatarPath && !avatarPath.startsWith('data:') && !avatarPath.startsWith('http') && !avatarPath.startsWith('blob:')) {
                                     const resolved = await loadGalleryAvatar(avatarPath);
                                     if (resolved) displayAvatar = resolved;
                                 }
@@ -424,7 +492,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                             if (parsedUser) {
                                 const avatarPath = parsedUser.avatar || '';
                                 let displayAvatar = nextUserProfile.displayAvatar;
-                                if (avatarPath && !avatarPath.startsWith('data:') && !avatarPath.startsWith('http') && !avatarPath.startsWith('blob:')) {
+                                if (avatarPath === 'default') {
+                                    if (!displayAvatar) displayAvatar = generateAvatar(parsedUser.name || nextUserProfile.name || 'U');
+                                } else if (avatarPath && !avatarPath.startsWith('data:') && !avatarPath.startsWith('http') && !avatarPath.startsWith('blob:')) {
                                     const resolved = await loadGalleryAvatar(avatarPath);
                                     if (resolved) displayAvatar = resolved;
                                 }
@@ -465,6 +535,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 setCustomThemes(dbThemes);
                 setUserProfile(nextUserProfile);
 
+                // Initialize AppRegistry from disk (migrates localStorage data if present)
+                try {
+                    const rawApi = localStorage.getItem('os_api_config');
+                    const apiCfg = rawApi ? JSON.parse(rawApi) : null;
+                    const wsPath = apiCfg?.nativeWorkspacePath?.trim() || '';
+                    const wsAllowGlobal = !!apiCfg?.securityPolicy?.allowGlobalFileAccess;
+                    if (wsPath) await AppRegistry.initialize(wsPath, wsAllowGlobal);
+                } catch { /* non-fatal */ }
+
             } catch (err) {
                 console.error('Data init failed:', err);
             } finally {
@@ -490,7 +569,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
             try {
                 const items = await fsBridge.readDir(root, '/', allowGlobal);
-                
+
                 // 1. Check Agent_Soul.md
                 const soulFile = items.find(i => i.type === 'file' && i.name === 'Agent_Soul.md');
                 if (soulFile && soulFile.updatedAt && soulFile.updatedAt > lastFileUpdateRef.current.agentSoul) {
@@ -498,15 +577,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                     const soulData = parseAgentSoulMarkdown(content);
                     if (soulData && agent) {
                         const systemPrompt = buildAgentSystemPromptFromSoul(soulData);
-                        
+
                         // Resolve avatar if it's a path
                         let displayAvatar = agent.displayAvatar;
-                        if (soulData.avatar && !soulData.avatar.startsWith('data:') && !soulData.avatar.startsWith('http') && !soulData.avatar.startsWith('blob:')) {
+                        if (soulData.avatar === 'default') {
+                            if (!displayAvatar) displayAvatar = generateAvatar(soulData.name || agent.name || 'A');
+                        } else if (soulData.avatar && !soulData.avatar.startsWith('data:') && !soulData.avatar.startsWith('http') && !soulData.avatar.startsWith('blob:')) {
                             try {
                                 const relPath = soulData.avatar.replace(/^\/+/, '');
                                 const base64 = await fsBridge.readFileBase64(galleryRoot, relPath, allowGlobal);
                                 displayAvatar = `data:image/jpeg;base64,${base64}`;
-                            } catch {}
+                            } catch { }
                         }
 
                         if (!cancelled) {
@@ -534,12 +615,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                     const parsedUser = parseUserProfileMarkdown(content);
                     if (parsedUser) {
                         let displayAvatar = userProfile.displayAvatar;
-                        if (parsedUser.avatar && !parsedUser.avatar.startsWith('data:') && !parsedUser.avatar.startsWith('http') && !parsedUser.avatar.startsWith('blob:')) {
+                        if (parsedUser.avatar === 'default') {
+                            if (!displayAvatar) displayAvatar = generateAvatar(parsedUser.name || userProfile.name || 'U');
+                        } else if (parsedUser.avatar && !parsedUser.avatar.startsWith('data:') && !parsedUser.avatar.startsWith('http') && !parsedUser.avatar.startsWith('blob:')) {
                             try {
                                 const relPath = parsedUser.avatar.replace(/^\/+/, '');
                                 const base64 = await fsBridge.readFileBase64(galleryRoot, relPath, allowGlobal);
                                 displayAvatar = `data:image/jpeg;base64,${base64}`;
-                            } catch {}
+                            } catch { }
                         }
 
                         if (!cancelled) {
@@ -567,6 +650,270 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
             clearInterval(timer);
         };
     }, [isDataLoaded, apiConfig.nativeWorkspacePath, apiConfig.securityPolicy, apiConfig.galleryWorkspacePath, agent?.id, userProfile.name]);
+
+    // --- L3 Daily Summary Trigger (schedule-aware, user-configurable) ---
+    useEffect(() => {
+        const rootPath = apiConfig.nativeWorkspacePath?.trim() || '';
+        const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+        const l3Cfg = apiConfig.l3SummaryConfig;
+        // Default: enabled, runs at 02:00
+        const l3Enabled = l3Cfg?.enabled !== false;
+        const triggerHour = l3Cfg?.baseHour ?? 2;
+        const triggerMinute = l3Cfg?.baseMinute ?? 0;
+
+        if (!isDataLoaded || !rootPath || !l3Enabled) return;
+
+        // Key: "l3_daily_ran_YYYY-MM-DD" — ensures pipeline runs at most once per calendar day
+        const getTodayKey = () => {
+            const d = new Date();
+            return `l3_daily_ran_${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+
+        // Build minimal LLM callbacks from l3SummaryConfig (falls back to main apiConfig)
+        const summaryBaseUrl = l3Cfg?.summaryBaseUrl?.trim() || apiConfig.baseUrl?.trim() || '';
+        const summaryApiKey = l3Cfg?.summaryApiKey?.trim() || apiConfig.apiKey?.trim() || '';
+        const summaryModel = l3Cfg?.summaryModel?.trim() || apiConfig.model?.trim() || '';
+        const summaryModelStrong = l3Cfg?.summaryModelStrong?.trim() || summaryModel;
+
+        const makeSummaryCall = (model: string) =>
+            async (systemPrompt: string, userPrompt: string): Promise<string> => {
+                // Normalize base URL: strip trailing /v1, /v1/, /v1/chat/completions etc.
+                const baseNorm = summaryBaseUrl.replace(/\/v1(\/.*)?$/, '');
+                const res = await fetch(`${baseNorm}/v1/chat/completions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${summaryApiKey}` },
+                    body: JSON.stringify({
+                        model,
+                        messages: [
+                            { role: 'system', content: systemPrompt },
+                            { role: 'user', content: userPrompt },
+                        ],
+                        temperature: 0.4,
+                        stream: false,
+                    }),
+                });
+                if (!res.ok) throw new Error(`LLM summary ${res.status}`);
+                const data = await res.json();
+                return data?.choices?.[0]?.message?.content?.trim() || '';
+            };
+
+        const charName = agent?.name || 'AI';
+        // Use how the agent actually addresses the user: preferred name > nickname > real name
+        const userName = userProfile?.preferredNames?.[0]
+            || userProfile?.nickname
+            || userProfile?.name
+            || '用户';
+
+        let llmConfig: LLMSummaryCallConfig | undefined;
+        let llmConfigStrong: LLMSummaryCallConfig | undefined;
+        if (summaryBaseUrl && summaryApiKey && summaryModel) {
+            llmConfig = { callLLM: makeSummaryCall(summaryModel), charName, userName };
+            llmConfigStrong = summaryModelStrong !== summaryModel
+                ? { callLLM: makeSummaryCall(summaryModelStrong), charName, userName }
+                : llmConfig;
+            console.warn(`[L3] LLM config ready: model=${summaryModel}${summaryModelStrong !== summaryModel ? `, strong=${summaryModelStrong}` : ''}`);
+        } else {
+            console.warn(`[L3] LLM config missing — summaries will be deferred until API is configured (baseUrl=${!!summaryBaseUrl}, apiKey=${!!summaryApiKey}, model=${!!summaryModel})`);
+        }
+
+        const runPipeline = async () => {
+            const releaseLock = acquireSummaryLock();
+            try {
+                await runL3Compensation({ rootPath, allowGlobal, maxDaysBack: 7, llmConfig, llmConfigStrong });
+                await runL3DailyPipeline(rootPath, allowGlobal, llmConfig, llmConfigStrong);
+                // P1: refresh blurbs in the live session immediately after pipeline completes
+                try {
+                    const [blurb, profBlurb] = await Promise.all([
+                        buildL3ContextBlurb(rootPath, allowGlobal),
+                        buildProfilesBlurb(rootPath, allowGlobal),
+                    ]);
+                    const upd: Partial<typeof agent> = {};
+                    if (blurb) upd.l3SummaryBlurb = blurb;
+                    if (profBlurb) upd.profilesBlurb = profBlurb;
+                    if (Object.keys(upd).length > 0) await updateAgent(upd);
+                } catch { }
+            } finally {
+                releaseLock();
+            }
+        };
+
+        const maybeRun = async () => {
+            const now = new Date();
+            const todayKey = getTodayKey();
+            // Only fire after the configured hour:minute
+            const pastTriggerTime = now.getHours() > triggerHour
+                || (now.getHours() === triggerHour && now.getMinutes() >= triggerMinute);
+            if (!pastTriggerTime) return;
+            // Guard: run at most once per calendar day
+            if (localStorage.getItem(todayKey)) return;
+            localStorage.setItem(todayKey, '1');
+            await runPipeline();
+        };
+
+        maybeRun();
+        // Check every 30 minutes so we catch the trigger window within the hour
+        const timer = setInterval(maybeRun, 30 * 60 * 1000);
+
+        const onHide = () => {
+            // Always run compensation on app hide (user switching away) to catch missed sessions
+            if (document.hidden) runPipeline().catch(() => { });
+        };
+        document.addEventListener('visibilitychange', onHide);
+
+        return () => {
+            clearInterval(timer);
+            document.removeEventListener('visibilitychange', onHide);
+        };
+    }, [isDataLoaded, apiConfig.nativeWorkspacePath, apiConfig.securityPolicy?.allowGlobalFileAccess, apiConfig.l3SummaryConfig]);
+
+    // --- L3 Agent Sync (promote drafts + build context blurb, runs on load and after pipeline) ---
+    const l3SyncedRef = useRef(false);
+    useEffect(() => {
+        const rootPath = apiConfig.nativeWorkspacePath?.trim() || '';
+        const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+        if (!isDataLoaded || !rootPath || !agent) return;
+        // Run once per session on load; the pipeline effect handles regeneration timing
+        if (l3SyncedRef.current) return;
+        l3SyncedRef.current = true;
+
+        // One-time migrations
+        migrateL2CleanToV2({ rootPath, allowGlobal }).catch(() => { });
+        migrateCleanLayoutToSessionsDir({ rootPath, allowGlobal }).catch(() => { });
+
+        const syncL3ToAgent = async () => {
+            try {
+                const [blurb, profBlurb, { newProposals, dynamicMemories }] = await Promise.all([
+                    buildL3ContextBlurb(rootPath, allowGlobal),
+                    buildProfilesBlurb(rootPath, allowGlobal),
+                    promoteL3Drafts(rootPath, allowGlobal, agent.coreProposals ?? []),
+                ]);
+
+                const updates: Partial<typeof agent> = {};
+
+                if (blurb) updates.l3SummaryBlurb = blurb;
+                if (profBlurb) updates.profilesBlurb = profBlurb;
+
+                if (dynamicMemories.length > 0) {
+                    // Replace dynamic memories entirely with the latest snapshot
+                    updates.dynamicMemories = dynamicMemories;
+                }
+
+                if (newProposals.length > 0) {
+                    updates.coreProposals = [...(agent.coreProposals ?? []), ...newProposals];
+                }
+
+                if (Object.keys(updates).length > 0) {
+                    await updateAgent(updates);
+                }
+            } catch {
+                // Non-fatal: L3 sync failure should not block the app
+            }
+        };
+
+        syncL3ToAgent();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isDataLoaded, apiConfig.nativeWorkspacePath, apiConfig.securityPolicy?.allowGlobalFileAccess, agent?.id]);
+
+    // --- Background L2 capture for non-Chat sources (heartbeat, cron, app interactions) ---
+    // useChatAI captures Chat messages when Chat is open.
+    // This watcher captures everything else regardless of which App is active.
+    useEffect(() => {
+        if (!isDataLoaded || !agent) return;
+        const rootPath = apiConfig.nativeWorkspacePath?.trim();
+        if (!rootPath) return;
+        const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+
+        // Watermark: last message id captured by this background watcher
+        const watermarkKey = `l2_bg_watermark_${agent.id}`;
+        const bgSessionRef = { current: null as import('../utils/memorySession').L2SessionState | null };
+
+        const scan = async () => {
+            const watermark = parseInt(localStorage.getItem(watermarkKey) || '0', 10);
+            const allMsgs = await DB.getMessagesByCharId(agent.id).catch(() => [] as import('../types').Message[]);
+
+            // Only capture non-chat-originated messages (source not 'chat' or undefined)
+            const pending = allMsgs
+                .filter(m => typeof m.id === 'number' && m.id > watermark)
+                .filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'system')
+                .filter(m => {
+                    const src = String((m.metadata as any)?.triggerSource || (m.metadata as any)?.source || '');
+                    // Skip messages with no special trigger — those are Chat messages handled by useChatAI
+                    return src === 'heartbeat' || src.startsWith('cron:') || src === 'cron'
+                        || src === 'call' || src === 'call-log' || src === 'call-end-popup'
+                        || src === 'call-followup-hint';
+                })
+                .sort((a, b) => (a.id as number) - (b.id as number));
+
+            if (pending.length === 0) return;
+            await ensureL2MemoryLayout(rootPath, allowGlobal);
+
+            let maxId = watermark;
+            // Track sessions touched so we can rebuild clean files afterwards
+            const touched = new Map<string, { rawFilePath: string; cleanFilePath: string }>();
+
+            for (const msg of pending) {
+                const ts = typeof msg.timestamp === 'number' ? msg.timestamp : Date.now();
+                const md = msg.metadata as Record<string, unknown> | undefined;
+                const src = String(md?.triggerSource || md?.source || '');
+                const trigger: import('../types').L2RawTrigger =
+                    src === 'heartbeat' ? { source: 'heartbeat', reason: 'heartbeat_tick' }
+                        : src.startsWith('cron') ? { source: 'cron', reason: src }
+                            : { source: 'call', reason: String(md?.variant || 'turn') };
+
+                const transition = resolveL2SessionState(bgSessionRef.current, {
+                    timestamp: ts, assistantPending: false, toolPending: false,
+                });
+                bgSessionRef.current = transition.state;
+
+                const result = await appendL2RawEvent({
+                    rootPath, allowGlobal, charId: agent.id,
+                    session: transition.state,
+                    type: msg.role === 'user' ? 'user_message'
+                        : msg.role === 'assistant' ? 'assistant_message' : 'system_message',
+                    timestamp: ts, role: msg.role,
+                    messageId: msg.id as number,
+                    messageType: msg.type,
+                    // Use prepareContentForRaw to avoid raw base64 and emit structured media labels
+                    content: prepareContentForRaw(msg as import('../types').Message),
+                    // Use pickMetadataForRaw to strip ephemeral blobs (avatar, audioBlob, etc.)
+                    metadata: pickMetadataForRaw(md),
+                    trigger,
+                    continuedFrom: transition.continuedFrom,
+                }).catch(() => null);
+
+                if (result?.rawFilePath) {
+                    const key = `${transition.state.sessionId}-${transition.state.part}`;
+                    if (!touched.has(key)) touched.set(key, { rawFilePath: result.rawFilePath, cleanFilePath: result.cleanFilePath });
+                }
+
+                maxId = Math.max(maxId, msg.id as number);
+            }
+            if (maxId > watermark) localStorage.setItem(watermarkKey, String(maxId));
+
+            // Rebuild clean files for all touched sessions (generates clean.json for call sessions etc.)
+            for (const { rawFilePath, cleanFilePath } of touched.values()) {
+                await rebuildL2CleanFromRaw({
+                    rootPath, allowGlobal, rawFilePath, cleanFilePath,
+                }).catch(() => { });
+            }
+        };
+
+        scan();
+        // Scan every 15s (was 60s) so call/cron messages reach raw promptly
+        const interval = setInterval(scan, 15_000);
+        // Also scan on visibility change (both hide and show) to catch messages before refresh
+        const onVisibility = () => scan();
+        document.addEventListener('visibilitychange', onVisibility);
+        // Flush on beforeunload to prevent data loss on refresh
+        const onUnload = () => scan();
+        window.addEventListener('beforeunload', onUnload);
+        return () => {
+            clearInterval(interval);
+            document.removeEventListener('visibilitychange', onVisibility);
+            window.removeEventListener('beforeunload', onUnload);
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isDataLoaded, agent?.id, apiConfig.nativeWorkspacePath, apiConfig.securityPolicy?.allowGlobalFileAccess]);
 
     // --- Scheduled Message Polling (Single Agent) ---
     useEffect(() => {
@@ -926,17 +1273,88 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
         const raw = await res.text();
         if (!res.ok) throw new Error(`API Error ${res.status}: ${raw.slice(0, 200)}`);
+        let resultText = '';
         try {
             const data = JSON.parse(raw);
             const text = extractText(data);
-            if (text) return text;
+            if (text) resultText = text;
         } catch {
             // fall through to SSE parse
         }
-        const sseText = parseSseText(raw);
-        if (sseText) return sseText;
-        throw new Error('API返回无法解析');
+        if (!resultText) {
+            const sseText = parseSseText(raw);
+            if (sseText) resultText = sseText;
+        }
+        if (!resultText) throw new Error('API返回无法解析');
+
+        // Capture this askAgent interaction to L2 (source = 'app', appId from systemContext heuristic)
+        const appIdMatch = systemContext?.match(/\[App(?:\s+System Context)?[:\s]+([^\]\n]+)\]/i);
+        const callerAppId = appIdMatch?.[1]?.trim() || 'unknown_app';
+        await L2CaptureService.captureAppInteraction({
+            appId: callerAppId,
+            prompt: prompt.slice(0, 500),
+            response: resultText,
+        }).catch(() => { });
+
+        return resultText;
     };
+
+    const dispatchAction = useCallback(async (actionTag: string, payload?: any, callerAppId?: string) => {
+        return ActionDispatcher.dispatch({ actionTag, payload, callerAppId });
+    }, []);
+
+    const createAppToolClient = useCallback((appId: string) => {
+        const safeAppId = String(appId || '').trim();
+        const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+        const workspaceRoot = apiConfig.nativeWorkspacePath?.trim() || '';
+        const galleryRoot = apiConfig.galleryWorkspacePath?.trim() || '';
+
+        const withCaller = async (capability: string, payload?: any) => {
+            return ToolGateway.invoke({
+                callerAppId: safeAppId || undefined,
+                capability,
+                payload,
+            });
+        };
+
+        return {
+            invoke: withCaller,
+            dispatchAction: async (actionTag: string, payload?: any) => {
+                return dispatchAction(actionTag, payload, safeAppId || undefined);
+            },
+            queryIndex: async (payload?: any) =>
+                dispatchAction('TOOL_QUERY_INDEX', payload || {}, safeAppId || undefined),
+            readRef: async (payload: { refType: string; refId: string }) =>
+                dispatchAction('TOOL_READ_REF', payload, safeAppId || undefined),
+            search: async (payload: { appId: string; query: string; limit?: number }) =>
+                dispatchAction('TOOL_SEARCH', payload, safeAppId || undefined),
+            resolveFile: async (payload?: any) => {
+                const scope = String(payload?.scope || 'workspace').trim().toLowerCase();
+                const defaults =
+                    scope === 'gallery'
+                        ? {
+                            indexRootPath: workspaceRoot || galleryRoot,
+                            scanRootPath: galleryRoot || workspaceRoot,
+                            allowGlobal,
+                            scanAllowGlobal: allowGlobal,
+                        }
+                        : {
+                            indexRootPath: workspaceRoot || galleryRoot,
+                            scanRootPath: workspaceRoot || galleryRoot,
+                            allowGlobal,
+                            scanAllowGlobal: allowGlobal,
+                        };
+                const nextPayload = { ...defaults, ...(payload || {}) };
+                return dispatchAction('TOOL_RESOLVE_FILE', nextPayload, safeAppId || undefined);
+            },
+        };
+    }, [
+        dispatchAction,
+        apiConfig.galleryWorkspacePath,
+        apiConfig.nativeWorkspacePath,
+        apiConfig.securityPolicy?.allowGlobalFileAccess,
+    ]);
+
 
     return (
         <OSContext.Provider
@@ -955,6 +1373,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 realtimeConfig, updateRealtimeConfig,
                 exportSystem, importSystem, resetSystem,
                 askAgent,
+                toolGateway: ToolGateway,
+                dispatchAction,
+                createAppToolClient,
                 callState, setCallState,
                 callDirection, setCallDirection,
                 showCallOverlay, setShowCallOverlay,
