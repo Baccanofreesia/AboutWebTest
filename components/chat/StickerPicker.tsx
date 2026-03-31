@@ -86,10 +86,13 @@ const AddByUrlModal: React.FC<{
         if (!trimName) { addToast('请输入表情名称', 'error'); return; }
         setLoading(true);
         try {
-            const ok = await StickerParser.favoriteSticker(workspaceRootPath, trimName, trimUrl, true);
-            if (ok) {
+            const result = await StickerParser.favoriteSticker(workspaceRootPath, trimName, trimUrl, true);
+            if (result === 'success') {
                 addToast(`"${trimName}" 已加入收藏`, 'success');
                 onSuccess();
+                onClose();
+            } else if (result === 'duplicate') {
+                addToast('已收藏过该表情', 'success');
                 onClose();
             } else {
                 addToast('下载失败，请检查 URL 是否可访问', 'error');

@@ -25,6 +25,7 @@ export function useVoiceRecorder() {
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const analyserRef = useRef<AnalyserNode | null>(null);
     const animFrameRef = useRef<number>(0);
+    const lastVolumeUpdateRef = useRef<number>(0);
     const resolveRef = useRef<((result: VoiceRecordResult | null) => void) | null>(null);
     const audioCtxRef = useRef<AudioContext | null>(null);
 
@@ -40,15 +41,32 @@ export function useVoiceRecorder() {
 
     const updateVolume = useCallback(() => {
         if (!analyserRef.current) return;
-        const data = new Uint8Array(analyserRef.current.fftSize);
-        analyserRef.current.getByteTimeDomainData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) {
-            const v = (data[i] - 128) / 128;
-            sum += v * v;
+        const analyser = analyserRef.current;
+        const freqData = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(freqData);
+        let freqSum = 0;
+        for (let i = 0; i < freqData.length; i++) {
+            freqSum += freqData[i];
         }
-        const rms = Math.sqrt(sum / data.length);
-        setVolumeLevel(Math.min(1, rms * 3)); // normalize to 0-1
+        const avgFreq = freqSum / Math.max(1, freqData.length);
+
+        const timeData = new Uint8Array(analyser.fftSize);
+        analyser.getByteTimeDomainData(timeData);
+        let squareSum = 0;
+        for (let i = 0; i < timeData.length; i++) {
+            const normalized = (timeData[i] - 128) / 128;
+            squareSum += normalized * normalized;
+        }
+        const rms = Math.sqrt(squareSum / Math.max(1, timeData.length));
+
+        // Mix RMS and frequency-domain energy for stabler microphone level.
+        const vol = Math.min(1, Math.max(rms * 2.8, avgFreq / 92));
+
+        const now = Date.now();
+        if (now - (lastVolumeUpdateRef.current || 0) > 100) {
+            setVolumeLevel(vol);
+            lastVolumeUpdateRef.current = now;
+        }
         animFrameRef.current = requestAnimationFrame(updateVolume);
     }, []);
 

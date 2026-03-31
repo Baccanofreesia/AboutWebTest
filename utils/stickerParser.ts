@@ -14,6 +14,8 @@ export interface StickerSet {
     items: StickerItem[];
 }
 
+export type FavoriteStickerResult = 'success' | 'duplicate' | 'failed';
+
 export class StickerParser {
     /**
      * Lists all category names based on .txt files in stickers/ and existence of collection/
@@ -67,7 +69,7 @@ export class StickerParser {
         try {
             const content = await fsBridge.readFile(workspaceRoot, filePath, true);
             const aliasMatch = content.match(/^@别名:\s*(.+)$/m);
-            const aliases = aliasMatch 
+            const aliases = aliasMatch
                 ? aliasMatch[1].split(/[,，、]+/).map(s => s.trim()).filter(Boolean)
                 : [];
 
@@ -143,8 +145,13 @@ export class StickerParser {
     /**
      * Favorites a sticker by downloading and saving it to the collection/ directory.
      */
-    static async favoriteSticker(workspaceRoot: string, name: string, url: string, allowGlobal: boolean = true): Promise<boolean> {
-        if (!workspaceRoot || !url) return false;
+    static async favoriteSticker(
+        workspaceRoot: string,
+        name: string,
+        url: string,
+        allowGlobal: boolean = true
+    ): Promise<FavoriteStickerResult> {
+        if (!workspaceRoot || !url) return 'failed';
 
         const collectionDirRelative = 'stickers/collection';
         const collectionDirFull = 'stickers/collection/';
@@ -161,6 +168,24 @@ export class StickerParser {
             const safeName = name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'unnamed_sticker';
             const fileName = `${safeName}.${ext}`;
             const filePath = `${collectionDirRelative}/${fileName}`;
+            const existing = await fsBridge.readDir(workspaceRoot, collectionDirFull, allowGlobal).catch(() => []);
+            const hasSameName = existing.some(item => item.type === 'file' && item.name.toLowerCase() === fileName.toLowerCase());
+            if (hasSameName) return 'duplicate';
+
+            if (url.startsWith('local://')) {
+                const relPath = url.replace('local://', '').replace(/\\/g, '/');
+                if (relPath.toLowerCase().startsWith('stickers/collection/')) {
+                    return 'duplicate';
+                }
+                try {
+                    const base64 = await fsBridge.readFileBase64(workspaceRoot, relPath, allowGlobal);
+                    await fsBridge.writeFileBase64(workspaceRoot, filePath, base64, allowGlobal);
+                    return 'success';
+                } catch (err) {
+                    console.error('Failed to favorite local sticker:', err);
+                    return 'failed';
+                }
+            }
 
             const response = await fetch(url);
             if (!response.ok) throw new Error(`Download failed: ${response.status}`);
@@ -176,10 +201,10 @@ export class StickerParser {
             });
 
             await fsBridge.writeFileBase64(workspaceRoot, filePath, base64, allowGlobal);
-            return true;
+            return 'success';
         } catch (e) {
             console.error('Failed to favorite sticker:', e);
-            return false;
+            return 'failed';
         }
     }
 
@@ -274,7 +299,7 @@ export class StickerParser {
                 const parentSet = sets.find(s => s.category === item.category);
                 const tagAliases = parentSet?.aliases || [];
                 const target = (item.name + ' ' + item.category + ' ' + tagAliases.join(' ')).toLowerCase();
-                
+
                 for (const kw of keywords) {
                     if (target.includes(kw)) score += kw.length >= 2 ? 3 : 1;
                 }

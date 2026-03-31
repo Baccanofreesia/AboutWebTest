@@ -82,7 +82,7 @@ const buildFreeRoamSystemPrompt = (
 ): string => {
     const coreContext = ContextBuilder.buildCoreContext(char, user, true);
     const now = new Date();
-    const timeStr = `${now.getFullYear()}-${(now.getMonth()+1).toString().padStart(2,'0')}-${now.getDate().toString().padStart(2,'0')} ${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
+    const timeStr = `${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')} ${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
     const hour = now.getHours();
     const timeOfDay = hour < 6 ? '深夜' : hour < 9 ? '清晨' : hour < 12 ? '上午' : hour < 14 ? '中午' : hour < 18 ? '下午' : hour < 22 ? '晚上' : '深夜';
 
@@ -90,7 +90,7 @@ const buildFreeRoamSystemPrompt = (
     if (pastActivities.length > 0) {
         pastStr = pastActivities.slice(-5).map(a => {
             const d = new Date(a.timestamp);
-            const ts = `${d.getMonth()+1}/${d.getDate()} ${d.getHours()}:${d.getMinutes().toString().padStart(2,'0')}`;
+            const ts = `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${d.getMinutes().toString().padStart(2, '0')}`;
             const actionLabel = { post: '发帖', browse: '刷首页', search: '搜索', comment: '评论', save_topic: '收藏话题', idle: '休息' }[a.actionType];
             return `[${ts}] ${actionLabel}: ${a.content.title || a.content.keyword || a.content.body || '无'} (${a.result})`;
         }).join('\n');
@@ -156,7 +156,7 @@ const buildDecisionPrompt = (): string => {
 const buildReactionPrompt = (notes: any[]): string => {
     const notesList = notes.slice(0, 8).map((n: any, i: number) => {
         const noteId = n.noteId || n.note_id || n.id || '';
-        return `${i+1}. [noteId=${noteId}]「${n.title || '无标题'}」by ${n.author || n.nickname || '匿名'} — ${(n.desc || n.content || '').slice(0, 150)} (❤️${n.likes || 0})`;
+        return `${i + 1}. [noteId=${noteId}]「${n.title || '无标题'}」by ${n.author || n.nickname || '匿名'} — ${(n.desc || n.content || '').slice(0, 150)} (❤️${n.likes || 0})`;
     }).join('\n');
 
     return `你刚才刷了小红书，看到了这些帖子:
@@ -186,7 +186,7 @@ const buildDetailReactionPrompt = (noteTitle: string, noteContent: string, comme
         const author = c.authorName || c.author_name || c.nickname || c.user?.nickname || '匿名';
         const content = c.content || c.text || '';
         const likes = c.likes || c.liked_count || c.likedCount || 0;
-        return `${i+1}. [commentId=${commentId}] ${author}: ${content} (${likes}赞)`;
+        return `${i + 1}. [commentId=${commentId}] ${author}: ${content} (${likes}赞)`;
     }).join('\n');
 
     return `你刚才查看了帖子「${noteTitle}」的详情:
@@ -215,7 +215,7 @@ ${comments.length > 0 ? `评论区:\n${commentsList}` : '这条帖子还没有�
 const buildProfileReactionPrompt = (profileInfo: string, notes: any[]): string => {
     const notesList = notes.slice(0, 8).map((n: any, i: number) => {
         const noteId = n.noteId || n.note_id || n.id || '';
-        return `${i+1}. [noteId=${noteId}]「${n.title || '无标题'}」❤️${n.likes || 0} 💬${n.comments || n.comment_count || 0}`;
+        return `${i + 1}. [noteId=${noteId}]「${n.title || '无标题'}」❤️${n.likes || 0} 💬${n.comments || n.comment_count || 0}`;
     }).join('\n');
 
     return `你刚才查看了自己的小红书主页:
@@ -240,15 +240,19 @@ ${notes.length > 0 ? `你发过的帖子:\n${notesList}` : '你还没有发过�
 const getRecentChatContext = async (charId: string, contextLimit: number): Promise<string> => {
     try {
         const limit = contextLimit || 500;
-        const msgs = await DB.getRecentMessagesByCharId(charId, limit);
-        if (msgs.length === 0) return '还没有和用户聊过天。';
-        return msgs.map(m => {
-            const role = m.role === 'user' ? '用户' : '角色';
+        const allMessages = await DB.getMessagesByCharId(charId);
+        const msgs = allMessages
+            .slice()
+            .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+            .slice(-limit);
+        if (msgs.length === 0) return 'No recent chat history.';
+        return msgs.map((m) => {
+            const role = m.role === 'user' ? 'User' : 'Assistant';
             const text = m.type === 'text' ? m.content : `[${m.type}]`;
             return `${role}: ${text}`;
         }).join('\n');
     } catch {
-        return '无法获取最近对话。';
+        return 'Failed to load recent chat history.';
     }
 };
 
@@ -430,7 +434,7 @@ export const XhsFreeRoamEngine = {
                         })).sort((a, b) => b.score - a.score);
                         if (scored[0]?.img.url) {
                             images = [scored[0].img.localPath || scored[0].img.url];
-                            DB.updateXhsStockImageUsage(scored[0].img.id).catch(() => {});
+                            DB.updateXhsStockImageUsage(scored[0].img.id).catch(() => { });
                         }
                     }
                 } catch { /* ignore */ }

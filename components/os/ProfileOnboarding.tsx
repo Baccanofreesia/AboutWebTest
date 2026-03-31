@@ -407,27 +407,11 @@ const ProfileOnboarding: React.FC<ProfileOnboardingProps> = ({ isOpen, onComplet
     const proceedWorkspace = useCallback(async () => {
         const ok = await applyWorkspaceConfig();
         if (!ok) return;
-        const root = workspacePath.trim();
-        if (!root) {
-            setStep('agent');
-            setLoading(false);
-            return;
-        }
-        const hasAgent = await workspaceFileExists(root, 'Agent_Soul.md', allowGlobal);
-        if (!hasAgent) {
-            setStep('agent');
-            setLoading(false);
-            return;
-        }
-        const hasUser = await workspaceFileExists(root, 'USER.md', allowGlobal);
-        if (!hasUser) {
-            setStep('user');
-            setLoading(false);
-            return;
-        }
-        localStorage.setItem('os_profile_setup_v1', 'true');
-        onComplete();
-    }, [allowGlobal, applyWorkspaceConfig, onComplete, workspacePath]);
+        // Always proceed to agent step — bootstrap creates default files, but onboarding
+        // should always let the user fill in agent persona and user profile.
+        setStep('agent');
+        setLoading(false);
+    }, [applyWorkspaceConfig]);
 
     const handleAvatarUpload = useCallback(async (target: AvatarTarget, e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];

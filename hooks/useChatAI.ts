@@ -11,6 +11,9 @@ import { voiceStopIntent } from '../utils/voiceIntent';
 import { resolveApiEndpoint } from '../utils/apiResolver';
 import { RealtimeContextManager } from '../utils/realtimeContext';
 import { AgentSoulData, UserProfileData } from '../utils/profileFiles';
+import { searchL3Memory } from '../utils/memoryDaily';
+import { waitForSummaryIdle } from '../utils/apiSemaphore';
+import { L2CaptureService, deriveL2Trigger } from '../utils/l2CaptureService';
 
 // ── chatPrompts 集中管理 prompt 与消息历史 ──
 import {
@@ -126,12 +129,25 @@ export const useChatAI = ({
         };
         if (transformBody) requestBody = transformBody(requestBody);
 
+        // DeepSeek 等 API 的 JSON parser 会把 \xHH 当作十六进制转义解析，
+        // 但 JSON 标准只支持 \uHHHH。聊天记录中的代码片段、终端输出等
+        // 可能包含 \x 序列导致 400 (unexpected end of hex escape)。
+        // 这里统一将完整的 \xHH 转为 \u00HH，不完整的则双重转义反斜杠。
+        const rawBody = JSON.stringify(requestBody);
+        const sanitizedBody = rawBody
+            .replace(/\\x([0-9a-fA-F]{2})/g, '\\u00$1')
+            .replace(/\\x(?![0-9a-fA-F]{2})/g, '\\\\x');
+
         const response = await fetch(chatUrl, {
             method: 'POST',
             headers,
-            body: JSON.stringify(requestBody),
+            body: sanitizedBody,
         });
-        if (!response.ok) throw new Error(`API Error ${response.status}`);
+        if (!response.ok) {
+            const errBody = await response.text().catch(() => '');
+            console.error(`[callLLM] ${response.status} ${response.statusText}`, errBody);
+            throw new Error(`API Error ${response.status}: ${errBody.slice(0, 200)}`);
+        }
         if (!response.body) throw new Error('ReadableStream not supported in fetch response.');
         return readStream(response.body);
     };
@@ -148,6 +164,20 @@ export const useChatAI = ({
         try {
             const resolved = resolveApiEndpoint(apiConfig);
             const headers = resolved.headers;
+
+            // ── 配置 L2 捕获服务 ──
+            const _l2Root = apiConfig?.nativeWorkspacePath?.trim() || '';
+            if (_l2Root) {
+                L2CaptureService.configure({
+                    rootPath: _l2Root,
+                    allowGlobal: !!apiConfig?.securityPolicy?.allowGlobalFileAccess,
+                    charId: char.id,
+                });
+                // 首次配置时将水位线设为当前最大消息 ID，
+                // 避免将历史聊天记录意外全量补录 —— 用户需主动点"历史补录"才导入历史。
+                L2CaptureService.initWatermark(currentMsgs);
+                await L2CaptureService.captureMessages(currentMsgs, deriveL2Trigger, { assistantPending: true });
+            }
 
             // ── 语音意图检测 ──
             const lastUserMsg = currentMsgs.filter(m => m.role === 'user').pop();
@@ -265,8 +295,9 @@ export const useChatAI = ({
             }
 
             // ════════════════════════════════════════
-            // 第一次 LLM 调用
+            // 第一次 LLM 调用（若总结 pipeline 正在占用同一 API，先等它完成）
             // ════════════════════════════════════════
+            await waitForSummaryIdle();
             let aiContent = cleanAiContent(
                 await callLLM(resolved.chatUrl, headers, apiMessages_full, 0.85, resolved.transformBody),
             );
@@ -294,6 +325,50 @@ export const useChatAI = ({
                         aiContent = recallContent;
                         addToast(`已调用 ${year}-${month} 记忆`, 'info');
                     }
+                    await L2CaptureService.captureToolCall({
+                        trigger: { source: 'chat', reason: 'recall' },
+                        toolName: 'RECALL',
+                        inputSummary: `${year}-${month}`,
+                        outputSummary: detailedLogs ? `调取 ${year}-${month} 档案成功` : '无数据',
+                        status: detailedLogs ? 'ok' : 'unknown',
+                    });
+                }
+            }
+
+            // ── MEMORY_SEARCH (L3 RAG) ──
+            const memSearchMatch = aiContent.match(/\[\[MEMORY_SEARCH:\s*([\s\S]*?)\]\]/);
+            if (memSearchMatch) {
+                const memQuery = memSearchMatch[1].trim();
+                const rootPath = apiConfig?.nativeWorkspacePath?.trim() || '';
+                const allowGlobal = !!apiConfig?.securityPolicy?.allowGlobalFileAccess;
+                if (memQuery && rootPath) {
+                    setRecallStatus(`正在检索记忆: "${memQuery}"...`);
+                    const memResult = await searchL3Memory(rootPath, allowGlobal, memQuery).catch(() => '');
+                    if (memResult) {
+                        const cleanedContent = aiContent.replace(/\[\[MEMORY_SEARCH:[\s\S]*?\]\]/g, '').trim() || '让我想想...';
+                        const memMessages = [
+                            ...apiMessages_full,
+                            { role: 'assistant', content: cleanedContent },
+                            {
+                                role: 'system',
+                                content: `[系统: 已从 L3 记忆库检索到相关内容]\n${memResult}\n[系统: 结合以上记忆内容自然地回答用户，不要提及"检索"或"系统"。]`,
+                            },
+                        ];
+                        const memContent = cleanAiContent(
+                            await callLLM(resolved.chatUrl, headers, memMessages, 0.8, resolved.transformBody),
+                        );
+                        if (memContent) {
+                            aiContent = memContent;
+                            addToast(`已检索 L3 记忆: "${memQuery}"`, 'info');
+                        }
+                    }
+                    await L2CaptureService.captureToolCall({
+                        trigger: { source: 'chat', reason: 'memory_search' },
+                        toolName: 'MEMORY_SEARCH',
+                        inputSummary: memQuery,
+                        outputSummary: memResult ? `命中 L3 摘要 (${memResult.length} chars)` : '无命中',
+                        status: memResult ? 'ok' : 'unknown',
+                    });
                 }
             }
 
@@ -337,9 +412,23 @@ export const useChatAI = ({
                                 aiContent = searchContent;
                                 addToast(`搜索完成: ${searchQuery}`, 'success');
                             }
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'web_search' },
+                                toolName: `WEB_SEARCH_${providerName.toUpperCase()}`,
+                                inputSummary: searchQuery,
+                                outputSummary: `${searchResult.results.length} 条结果`,
+                                status: 'ok',
+                            });
                         } else {
                             addToast(`搜索失败: ${searchResult.message}`, 'error');
                             aiContent = aiContent.replace(searchMatch[0], '').trim();
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'web_search' },
+                                toolName: `WEB_SEARCH_${providerName.toUpperCase()}`,
+                                inputSummary: searchQuery,
+                                outputSummary: searchResult.message || '无结果',
+                                status: 'error',
+                            });
                         }
                     } catch (e: any) {
                         addToast(`${providerName} 搜索失败: ${e?.message || '网络错误'}`, 'error');
@@ -393,6 +482,16 @@ export const useChatAI = ({
                 }
             }
             aiContent = aiContent.replace(nicknameRegex, '').trim();
+            if (relationActions.length > 0) {
+                for (const ra of relationActions) {
+                    await L2CaptureService.captureDecision({
+                        trigger: { source: 'chat', reason: 'action_tag' },
+                        actionTag: `[[ACTION:${ra.type.toUpperCase()}]]`,
+                        outcome: ra.type,
+                        rawResponse: ra.summary,
+                    });
+                }
+            }
 
             // ── 相册工具（resolveGalleryPath / loadGalleryDataUrl 等）──
             let galleryEntriesCache: { name: string; path: string }[] | null = null;
@@ -498,10 +597,10 @@ export const useChatAI = ({
                     await updateAgent({ avatar: agentResolved.resolvedPath, displayAvatar: agentResolved.dataUrl });
                     await syncUserProfileFile({ avatar: userResolved.resolvedPath }, userProfile, apiConfig);
                     await syncAgentSoulFile({ avatar: agentResolved.resolvedPath }, char, apiConfig);
-                    relationActions.push({ type: 'couple_avatar_set', summary: `设置双人头像 user=${userResolved.resolvedPath}, agent=${agentResolved.resolvedPath}` });
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 已设置双人头像]` });
+                    relationActions.push({ type: 'couple_avatar_set', summary: `设置情侣头像 user=${userResolved.resolvedPath}, agent=${agentResolved.resolvedPath}` });
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 已设置情侣头像]` });
                 } catch (e: any) {
-                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 双人头像设置失败: ${e?.message || '未知错误'}]` });
+                    await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 情侣头像设置失败: ${e?.message || '未知错误'}]` });
                 }
             }
             aiContent = aiContent.replace(coupleRegex, '').trim();
@@ -595,11 +694,11 @@ export const useChatAI = ({
 
             const waitMs = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-            const runXhsWithRetry = async (
-                task: () => Promise<{ success: boolean; error?: string }>,
+            const runXhsWithRetry = async <T extends { success: boolean; error?: string }>(
+                task: () => Promise<T>,
                 retryDelays: number[],
                 shouldRetry?: (errorText: string) => boolean,
-            ) => {
+            ): Promise<T> => {
                 let result = await task();
                 for (const delay of retryDelays) {
                     if (result.success) break;
@@ -609,6 +708,74 @@ export const useChatAI = ({
                     result = await task();
                 }
                 return result;
+            };
+
+            const resolveReplyCommentMeta = async (noteToken: string, commentId: string) => {
+                let userId = commentUserIdCacheRef.current.get(commentId);
+                let authorName = commentAuthorNameCacheRef.current.get(commentId);
+                let parentCommentId = commentParentIdCacheRef.current.get(commentId);
+                if (userId) {
+                    return { userId, authorName, parentCommentId };
+                }
+                const noteId = extractNoteId(noteToken);
+                if (!xhsAvailable || !noteId) {
+                    return { userId, authorName, parentCommentId };
+                }
+                try {
+                    const detailResult = await runXhsWithRetry(
+                        () => XhsMcpClient.getNoteDetail(
+                            xhsServerUrl,
+                            `https://www.xiaohongshu.com/explore/${noteId}`,
+                            findXsecToken(noteToken),
+                            { loadAllComments: true },
+                        ),
+                        [1800],
+                        (errorText) => !/参数|格式|invalid/i.test(errorText),
+                    );
+                    if (detailResult.success && detailResult.data) {
+                        cacheCommentMetaFromDetail(detailResult.data);
+                        userId = commentUserIdCacheRef.current.get(commentId);
+                        authorName = commentAuthorNameCacheRef.current.get(commentId);
+                        parentCommentId = commentParentIdCacheRef.current.get(commentId);
+                    }
+                } catch {
+                    // keep existing fallback path
+                }
+                return { userId, authorName, parentCommentId };
+            };
+
+            const pickXhsPostImages = async (keywordHint: string): Promise<string[]> => {
+                const hint = String(keywordHint || '').toLowerCase();
+                try {
+                    const stockImages = await DB.getXhsStockImages();
+                    if (stockImages.length > 0) {
+                        const scored = stockImages
+                            .map((img) => {
+                                const tagScore = (img.tags || []).reduce((score, tag) => {
+                                    const t = String(tag || '').toLowerCase();
+                                    return t && hint.includes(t) ? score + 10 : score;
+                                }, 0);
+                                const freshness = Math.max(0, 5 - (img.usedCount || 0));
+                                return { img, score: tagScore + freshness };
+                            })
+                            .sort((a, b) => b.score - a.score);
+                        const chosen = scored[0]?.img;
+                        const resolved = chosen ? [chosen.localPath || chosen.url].filter(Boolean) : [];
+                        if (chosen?.id) DB.updateXhsStockImageUsage(chosen.id).catch(() => { });
+                        if (resolved.length > 0) return resolved;
+                    }
+                } catch {
+                    // ignore
+                }
+
+                try {
+                    const gallery = await DB.getGalleryImages(char.id);
+                    const latest = [...gallery].sort((a, b) => b.timestamp - a.timestamp)[0];
+                    if (latest?.url) return [latest.url];
+                } catch {
+                    // ignore
+                }
+                return [];
             };
 
             const applyXhsActionTags = async (input: string, stageLabel: string) => {
@@ -626,6 +793,13 @@ export const useChatAI = ({
                             content: note.title || '小红书笔记',
                             metadata: { xhsNote: note }
                         });
+                        await L2CaptureService.captureToolCall({
+                            trigger: { source: 'chat', reason: 'xhs_share' },
+                            toolName: 'XHS_SHARE',
+                            inputSummary: `分享笔记: ${note.title || note.noteId || '未知'}`,
+                            outputSummary: '已分享卡片',
+                            status: 'ok',
+                        }).catch(() => { });
                     }
                 }
                 content = content.replace(/\[\[XHS_SHARE:\s*\d+\]\]/g, '').trim();
@@ -639,15 +813,45 @@ export const useChatAI = ({
                     const tags = (parts[2] || '').match(/#(\S+)/g)?.map(t => t.replace('#', '')) || [];
                     if (xhsAvailable && title && body) {
                         try {
-                            const result = await XhsMcpClient.publishNote(xhsServerUrl, { title, content: body, tags });
-                            await DB.saveMessage({
-                                charId: char.id,
-                                role: 'system',
-                                type: 'text',
-                                content: result.success
-                                    ? `[系统: 小红书笔记发布成功]`
-                                    : `[系统: 小红书发帖失败: ${result.error || '未知错误'}]`,
-                            });
+                            const imageHint = [title, body, ...tags].join(' ');
+                            const images = await pickXhsPostImages(imageHint);
+                            if (images.length === 0) {
+                                await DB.saveMessage({
+                                    charId: char.id,
+                                    role: 'system',
+                                    type: 'text',
+                                    content: '[系统: 小红书发帖失败: 需先在「小红书图库」或「相册」准备至少 1 张可发布图片]',
+                                });
+                                await L2CaptureService.captureToolCall({
+                                    trigger: { source: 'chat', reason: 'xhs_post' },
+                                    toolName: 'XHS_POST',
+                                    inputSummary: `发帖: ${title}`,
+                                    outputSummary: '失败: 无可用图片',
+                                    status: 'error',
+                                }).catch(() => { });
+                            } else {
+                                const result = await XhsMcpClient.publishNote(xhsServerUrl, {
+                                    title,
+                                    content: body,
+                                    tags,
+                                    images,
+                                });
+                                await DB.saveMessage({
+                                    charId: char.id,
+                                    role: 'system',
+                                    type: 'text',
+                                    content: result.success
+                                        ? `[系统: 小红书笔记发布成功]`
+                                        : `[系统: 小红书发帖失败: ${result.error || '未知错误'}]`,
+                                });
+                                await L2CaptureService.captureToolCall({
+                                    trigger: { source: 'chat', reason: 'xhs_post' },
+                                    toolName: 'XHS_POST',
+                                    inputSummary: `发帖: ${title} | tags: ${tags.join(',')}`,
+                                    outputSummary: result.success ? '发布成功' : `失败: ${result.error || '未知错误'}`,
+                                    status: result.success ? 'ok' : 'error',
+                                }).catch(() => { });
+                            }
                         } catch (e: any) {
                             await DB.saveMessage({
                                 charId: char.id,
@@ -655,6 +859,13 @@ export const useChatAI = ({
                                 type: 'text',
                                 content: `[系统: 小红书发帖失败: ${e?.message || '未知错误'}]`,
                             });
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'xhs_post' },
+                                toolName: 'XHS_POST',
+                                inputSummary: `发帖: ${title}`,
+                                outputSummary: `异常: ${e?.message || '未知错误'}`,
+                                status: 'error',
+                            }).catch(() => { });
                         }
                     }
                     content = content.replace(/\[\[XHS_POST:.*?\]\]/gs, '').trim();
@@ -689,6 +900,13 @@ export const useChatAI = ({
                                     ? `[系统: 小红书评论已发送]`
                                     : `[系统: 小红书评论失败: ${result.error || '未知错误'}]`,
                             });
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'xhs_comment' },
+                                toolName: 'XHS_COMMENT',
+                                inputSummary: `评论笔记 ${noteId}: ${commentText.slice(0, 80)}`,
+                                outputSummary: result.success ? '评论成功' : `失败: ${result.error || '未知错误'}`,
+                                status: result.success ? 'ok' : 'error',
+                            }).catch(() => { });
                         } catch (e: any) {
                             await DB.saveMessage({
                                 charId: char.id,
@@ -696,6 +914,13 @@ export const useChatAI = ({
                                 type: 'text',
                                 content: `[系统: 小红书评论失败: ${e?.message || '未知错误'}]`,
                             });
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'xhs_comment' },
+                                toolName: 'XHS_COMMENT',
+                                inputSummary: `评论笔记: ${commentText.slice(0, 80)}`,
+                                outputSummary: `异常: ${e?.message || '未知错误'}`,
+                                status: 'error',
+                            }).catch(() => { });
                         }
                     }
                     content = content.replace(/\[\[XHS_COMMENT:.*?\]\]/g, '').trim();
@@ -709,11 +934,17 @@ export const useChatAI = ({
                         const [noteToken, commentId, ...replyParts] = parts;
                         const replyContent = replyParts.join('|').trim();
                         const noteId = extractNoteId(noteToken);
-                        const commentUserId = commentUserIdCacheRef.current.get(commentId);
-                        const commentAuthorName = commentAuthorNameCacheRef.current.get(commentId);
-                        const parentCommentId = commentParentIdCacheRef.current.get(commentId);
+                        let commentUserId = commentUserIdCacheRef.current.get(commentId);
+                        let commentAuthorName = commentAuthorNameCacheRef.current.get(commentId);
+                        let parentCommentId = commentParentIdCacheRef.current.get(commentId);
                         if (xhsAvailable && noteId && commentId && replyContent) {
                             try {
+                                if (!commentUserId) {
+                                    const resolvedMeta = await resolveReplyCommentMeta(noteToken, commentId);
+                                    commentUserId = resolvedMeta.userId;
+                                    commentAuthorName = resolvedMeta.authorName;
+                                    parentCommentId = resolvedMeta.parentCommentId;
+                                }
                                 let result = await XhsMcpClient.replyComment(
                                     xhsServerUrl,
                                     noteId,
@@ -771,6 +1002,13 @@ export const useChatAI = ({
                                         ? `[系统: 小红书回复已发送]`
                                         : `[系统: 小红书回复失败(${stageLabel}): ${result.error || '未知错误'}]`,
                                 });
+                                await L2CaptureService.captureToolCall({
+                                    trigger: { source: 'chat', reason: 'xhs_reply' },
+                                    toolName: 'XHS_REPLY',
+                                    inputSummary: `回复评论 ${commentId}@${noteId}: ${replyContent.slice(0, 80)}`,
+                                    outputSummary: result.success ? '回复成功' : `失败: ${result.error || '未知错误'}`,
+                                    status: result.success ? 'ok' : 'error',
+                                }).catch(() => { });
                             } catch (e: any) {
                                 await DB.saveMessage({
                                     charId: char.id,
@@ -778,6 +1016,13 @@ export const useChatAI = ({
                                     type: 'text',
                                     content: `[系统: 小红书回复失败(${stageLabel}): ${e?.message || '未知错误'}]`,
                                 });
+                                await L2CaptureService.captureToolCall({
+                                    trigger: { source: 'chat', reason: 'xhs_reply' },
+                                    toolName: 'XHS_REPLY',
+                                    inputSummary: `回复评论@${noteId}: ${replyContent.slice(0, 80)}`,
+                                    outputSummary: `异常: ${e?.message || '未知错误'}`,
+                                    status: 'error',
+                                }).catch(() => { });
                             }
                         }
                     }
@@ -794,7 +1039,22 @@ export const useChatAI = ({
                                 [1800],
                                 (errorText) => !/参数|格式|invalid/i.test(errorText),
                             );
-                        } catch { /* noop */ }
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'xhs_like' },
+                                toolName: 'XHS_LIKE',
+                                inputSummary: `点赞笔记 ${noteId}`,
+                                outputSummary: '点赞成功',
+                                status: 'ok',
+                            }).catch(() => { });
+                        } catch {
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'xhs_like' },
+                                toolName: 'XHS_LIKE',
+                                inputSummary: `点赞笔记 ${noteId}`,
+                                outputSummary: '点赞失败',
+                                status: 'error',
+                            }).catch(() => { });
+                        }
                     }
                 }
                 content = content.replace(/\[\[XHS_LIKE:.*?\]\]/g, '').trim();
@@ -809,7 +1069,22 @@ export const useChatAI = ({
                                 [1800],
                                 (errorText) => !/参数|格式|invalid/i.test(errorText),
                             );
-                        } catch { /* noop */ }
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'xhs_fav' },
+                                toolName: 'XHS_FAV',
+                                inputSummary: `收藏笔记 ${noteId}`,
+                                outputSummary: '收藏成功',
+                                status: 'ok',
+                            }).catch(() => { });
+                        } catch {
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'xhs_fav' },
+                                toolName: 'XHS_FAV',
+                                inputSummary: `收藏笔记 ${noteId}`,
+                                outputSummary: '收藏失败',
+                                status: 'error',
+                            }).catch(() => { });
+                        }
                     }
                 }
                 content = content.replace(/\[\[XHS_FAV:.*?\]\]/g, '').trim();
@@ -834,8 +1109,22 @@ export const useChatAI = ({
                         } else {
                             await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书搜索「${keyword}」暂无结果]` });
                         }
+                        await L2CaptureService.captureToolCall({
+                            trigger: { source: 'chat', reason: 'xhs_search' },
+                            toolName: 'XHS_SEARCH',
+                            inputSummary: `搜索: ${keyword}`,
+                            outputSummary: `${notes.length} 条结果`,
+                            status: 'ok',
+                        }).catch(() => { });
                     } catch (e: any) {
                         await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书搜索失败: ${e?.message || '未知错误'}]` });
+                        await L2CaptureService.captureToolCall({
+                            trigger: { source: 'chat', reason: 'xhs_search' },
+                            toolName: 'XHS_SEARCH',
+                            inputSummary: `搜索: ${keyword}`,
+                            outputSummary: `异常: ${e?.message || '未知错误'}`,
+                            status: 'error',
+                        }).catch(() => { });
                     }
                 } else if (!xhsAvailable) {
                     await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法搜索]` });
@@ -856,8 +1145,22 @@ export const useChatAI = ({
                             const cleaned = aiContent.replace(/\[\[XHS_(?:FEED|BROWSE).*?\]\]/g, '').trim() || '让我刷刷小红书...';
                             aiContent = await runXhsFollowup(cleaned, `[系统: 你刷了一会儿小红书首页，以下是你看到的内容]\n\n${notesStr}\n\n[系统: 你已经看完了（注意：以上只是摘要，想看某条笔记的完整正文可以用 [[XHS_DETAIL: noteId]]）。现在请你：\n1. 随意聊聊你看到的有趣内容\n2. 可用 [[XHS_SHARE: 序号]] 分享卡片\n3. 可用 [[XHS_POST]] / [[XHS_LIKE]] / [[XHS_FAV]] / [[XHS_DETAIL]]\n4. 严禁再输出[[XHS_BROWSE]]标记]`);
                         }
+                        await L2CaptureService.captureToolCall({
+                            trigger: { source: 'chat', reason: 'xhs_browse' },
+                            toolName: 'XHS_BROWSE',
+                            inputSummary: '浏览推荐流',
+                            outputSummary: `${notes.length} 条推荐`,
+                            status: 'ok',
+                        }).catch(() => { });
                     } catch (e: any) {
                         await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 获取小红书推荐失败: ${e?.message || '未知错误'}]` });
+                        await L2CaptureService.captureToolCall({
+                            trigger: { source: 'chat', reason: 'xhs_browse' },
+                            toolName: 'XHS_BROWSE',
+                            inputSummary: '浏览推荐流',
+                            outputSummary: `异常: ${e?.message || '未知错误'}`,
+                            status: 'error',
+                        }).catch(() => { });
                     }
                 } else {
                     await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法获取推荐流]` });
@@ -893,8 +1196,22 @@ export const useChatAI = ({
                         const notesStr = notes.length ? buildNotesStr(notes) : '（没有找到相关笔记）';
                         const cleaned = aiContent.replace(/\[\[XHS_MY_PROFILE\]\]/g, '').trim() || '让我看看我的小红书...';
                         aiContent = await runXhsFollowup(cleaned, `[系统: 你打开了自己的小红书]\n昵称: ${nickname || '未知'}${userId ? ` (userId: ${userId})` : ''}\n\n主页信息:\n${profileInfo || '（主页信息暂不可用）'}\n\n你的笔记:\n${notesStr}\n\n[系统: 你已经看完了主页。可以用 [[XHS_DETAIL]] 查看详情，或 [[XHS_POST]] 发新帖。严禁再输出[[XHS_MY_PROFILE]]标记]`);
+                        await L2CaptureService.captureToolCall({
+                            trigger: { source: 'chat', reason: 'xhs_profile' },
+                            toolName: 'XHS_MY_PROFILE',
+                            inputSummary: `查看主页: ${nickname || '未知'}`,
+                            outputSummary: `${notes.length} 条笔记`,
+                            status: 'ok',
+                        }).catch(() => { });
                     } catch (e: any) {
                         await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书主页加载失败: ${e?.message || '未知错误'}]` });
+                        await L2CaptureService.captureToolCall({
+                            trigger: { source: 'chat', reason: 'xhs_profile' },
+                            toolName: 'XHS_MY_PROFILE',
+                            inputSummary: '查看主页',
+                            outputSummary: `异常: ${e?.message || '未知错误'}`,
+                            status: 'error',
+                        }).catch(() => { });
                     }
                 } else {
                     await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法查看主页]` });
@@ -955,8 +1272,15 @@ export const useChatAI = ({
                             const cleaned = aiContent.replace(/\[\[XHS_DETAIL:.*?\]\]/g, '').trim() || '让我看看这条笔记...';
                             aiContent = await runXhsFollowup(
                                 cleaned,
-                                `[系统: 你点开了一条小红书笔记的详情页（noteId=${noteId || '未知'}）]\n\n${detailStr}\n\n[系统: 你已经看完了完整内容和评论区。现在请你：\n1. 自然地分享你看到的内容\n2. 如需评论请用 [[XHS_COMMENT: ${noteId || 'noteId'} | 评论内容]]\n3. 如需回复评论请用 [[XHS_REPLY: ${noteId || 'noteId'} | commentId | 回复内容]]\n4. 如需点赞/收藏请用 [[XHS_LIKE: ${noteId || 'noteId'}]] / [[XHS_FAV: ${noteId || 'noteId'}]]\n5. 严禁口头声称“已点赞/已评论”却不输出对应工具标记]`,
+                                `[系统: 你点开了一条小红书笔记的详情页（noteId=${noteId || '未知'}）]\n\n${detailStr}\n\n[系统: 你已经看完了完整内容和评论区。现在请你：\n1. 自然地分享你看到的内容\n2. 如需评论请用 [[XHS_COMMENT: ${noteId || 'noteId'} | 评论内容]]\n3. 如需回复评论请用 [[XHS_REPLY: ${noteId || 'noteId'} | commentId | 回复内容]]\n4. 如需点赞/收藏请用 [[XHS_LIKE: ${noteId || 'noteId'}]] / [[XHS_FAV: ${noteId || 'noteId'}]]\n5. 严禁口头声称”已点赞/已评论”却不输出对应工具标记]`,
                             );
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'xhs_detail' },
+                                toolName: 'XHS_DETAIL',
+                                inputSummary: `查看笔记详情 ${noteId || '未知'}`,
+                                outputSummary: `${note.title || '已加载详情'}`,
+                                status: 'ok',
+                            }).catch(() => { });
                         } else {
                             await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书详情获取失败]` });
                             const cleaned = aiContent.replace(/\[\[XHS_DETAIL:.*?\]\]/g, '').trim() || '这条笔记好像打不开...';
@@ -964,6 +1288,13 @@ export const useChatAI = ({
                                 cleaned,
                                 `[系统: 你尝试打开小红书笔记（noteId=${noteId || '未知'}）但加载失败了]\n\n[系统: 现在请你：\n1. 自然告诉用户这条笔记当前打不开/加载失败\n2. 可以建议先搜索相关关键词再试：[[XHS_SEARCH: 关键词]]\n3. 或先从主页重新定位：[[XHS_MY_PROFILE]]\n4. 严禁再输出[[XHS_DETAIL:...]]标记]`,
                             );
+                            await L2CaptureService.captureToolCall({
+                                trigger: { source: 'chat', reason: 'xhs_detail' },
+                                toolName: 'XHS_DETAIL',
+                                inputSummary: `查看笔记详情 ${noteId || '未知'}`,
+                                outputSummary: '加载失败',
+                                status: 'error',
+                            }).catch(() => { });
                         }
                     } catch (e: any) {
                         await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书详情失败: ${e?.message || '未知错误'}]` });
@@ -972,6 +1303,13 @@ export const useChatAI = ({
                             cleaned,
                             `[系统: 你尝试打开小红书笔记时发生异常：${e?.message || '未知错误'}]\n\n[系统: 请自然说明失败，并给出下一步可执行建议（例如重新搜索、稍后重试）。严禁再输出[[XHS_DETAIL:...]]标记]`,
                         );
+                        await L2CaptureService.captureToolCall({
+                            trigger: { source: 'chat', reason: 'xhs_detail' },
+                            toolName: 'XHS_DETAIL',
+                            inputSummary: `查看笔记详情 ${noteToken}`,
+                            outputSummary: `异常: ${e?.message || '未知错误'}`,
+                            status: 'error',
+                        }).catch(() => { });
                     }
                 } else if (!xhsAvailable) {
                     await DB.saveMessage({ charId: char.id, role: 'system', type: 'text', content: `[系统: 小红书 MCP 未启用，无法查看详情]` });
@@ -1168,6 +1506,7 @@ export const useChatAI = ({
 
             // 多轮 concurrency 处理
             const latestMsgs = await DB.getMessagesByCharId(char.id);
+            await L2CaptureService.captureMessages(latestMsgs, deriveL2Trigger);
             const latestUserMsgs = latestMsgs.filter(m => m.role === 'user' && m.metadata?.source !== 'call');
             const currentUserMsgs = currentMsgs.filter(m => m.role === 'user' && m.metadata?.source !== 'call');
             if (hasToolResult || latestUserMsgs.length > currentUserMsgs.length) {
@@ -1178,7 +1517,9 @@ export const useChatAI = ({
                 charId: char!.id, role: 'system', type: 'text',
                 content: `[连接中断: ${e.message}]`,
             });
-            setMessages(await DB.getMessagesByCharId(char!.id));
+            const erroredMsgs = await DB.getMessagesByCharId(char!.id);
+            await L2CaptureService.captureMessages(erroredMsgs, deriveL2Trigger);
+            setMessages(erroredMsgs);
         } finally {
             setIsTyping(false);
             setRecallStatus('');

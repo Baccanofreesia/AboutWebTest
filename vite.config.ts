@@ -667,6 +667,8 @@ export default defineConfig({
   plugins: [react(), fsProxyPlugin()],
   base: './', // 关键配置：使用相对路径，确保在 GitHub Pages 子目录下能找到资源
   server: {
+    host: '127.0.0.1',
+    port: 5176,
     proxy: {
       '/api/proxy/volcengine': {
         target: 'https://ark.cn-beijing.volces.com',

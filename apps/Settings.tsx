@@ -93,6 +93,19 @@ const Settings: React.FC = () => {
     const [localFishUrl, setLocalFishUrl] = useState(apiConfig.fishSpeechBaseUrl || '');
     const [localFishKey, setLocalFishKey] = useState(apiConfig.fishSpeechApiKey || '');
 
+    // L3 Summary Schedule Config
+    const [l3Enabled, setL3Enabled] = useState(apiConfig.l3SummaryConfig?.enabled !== false);
+    const [l3Hour, setL3Hour] = useState(apiConfig.l3SummaryConfig?.baseHour ?? 2);
+    const [l3Minute, setL3Minute] = useState(apiConfig.l3SummaryConfig?.baseMinute ?? 0);
+    const [l3SummaryApiSource, setL3SummaryApiSource] = useState<ApiSource>(apiConfig.l3SummaryConfig?.summaryApiSource || 'openai_compatible');
+    const [l3SummaryUrl, setL3SummaryUrl] = useState(apiConfig.l3SummaryConfig?.summaryBaseUrl || '');
+    const [l3SummaryKey, setL3SummaryKey] = useState(apiConfig.l3SummaryConfig?.summaryApiKey || '');
+    const [l3SummaryModel, setL3SummaryModel] = useState(apiConfig.l3SummaryConfig?.summaryModel || '');
+    const [l3SummaryModelStrong, setL3SummaryModelStrong] = useState(apiConfig.l3SummaryConfig?.summaryModelStrong || '');
+
+    // Track which target we are picking a model for
+    const [activeModelTarget, setActiveModelTarget] = useState<'main' | 'l3Daily' | 'l3Strong'>('main');
+
     // Auto-save draft configs locally to prevent loss during typing
     useEffect(() => {
         setLocalUrl(apiConfig.baseUrl);
@@ -109,6 +122,14 @@ const Settings: React.FC = () => {
         setLocalMinimaxGroup(apiConfig.minimaxGroupId || '');
         setLocalFishUrl(apiConfig.fishSpeechBaseUrl || '');
         setLocalFishKey(apiConfig.fishSpeechApiKey || '');
+        setL3Enabled(apiConfig.l3SummaryConfig?.enabled !== false);
+        setL3Hour(apiConfig.l3SummaryConfig?.baseHour ?? 2);
+        setL3Minute(apiConfig.l3SummaryConfig?.baseMinute ?? 0);
+        setL3SummaryApiSource(apiConfig.l3SummaryConfig?.summaryApiSource || 'openai_compatible');
+        setL3SummaryUrl(apiConfig.l3SummaryConfig?.summaryBaseUrl || '');
+        setL3SummaryKey(apiConfig.l3SummaryConfig?.summaryApiKey || '');
+        setL3SummaryModel(apiConfig.l3SummaryConfig?.summaryModel || '');
+        setL3SummaryModelStrong(apiConfig.l3SummaryConfig?.summaryModelStrong || '');
     }, [apiConfig]);
 
     useEffect(() => {
@@ -194,7 +215,17 @@ const Settings: React.FC = () => {
             minimaxApiKey: localMinimaxKey,
             minimaxGroupId: localMinimaxGroup,
             fishSpeechBaseUrl: localFishUrl,
-            fishSpeechApiKey: localFishKey
+            fishSpeechApiKey: localFishKey,
+            l3SummaryConfig: {
+                enabled: l3Enabled,
+                baseHour: l3Hour,
+                baseMinute: l3Minute,
+                summaryApiSource: l3SummaryApiSource,
+                summaryBaseUrl: l3SummaryUrl || undefined,
+                summaryApiKey: l3SummaryKey || undefined,
+                summaryModel: l3SummaryModel || undefined,
+                summaryModelStrong: l3SummaryModelStrong || undefined,
+            },
         };
         updateApiConfig(newApiConfig);
         setStatusMsg('配置已保存，正在同步...');
@@ -231,25 +262,39 @@ const Settings: React.FC = () => {
         }
     };
 
-    const fetchModels = async () => {
-        const hardcoded = getHardcodedModels(localApiSource);
+    const fetchModels = async (target: 'main' | 'l3Daily' | 'l3Strong' = 'main') => {
+        setActiveModelTarget(target);
+        const source = target === 'main' ? localApiSource : l3SummaryApiSource;
+        const hardcoded = getHardcodedModels(source);
+
+        let targetModel = localModel;
+        if (target === 'l3Daily') targetModel = l3SummaryModel;
+        if (target === 'l3Strong') targetModel = l3SummaryModelStrong;
+
         if (hardcoded) {
             setAvailableModels(hardcoded);
-            if (!hardcoded.includes(localModel)) setLocalModel(hardcoded[0]);
+            if (!hardcoded.includes(targetModel)) {
+                if (target === 'main') setLocalModel(hardcoded[0]);
+                else if (target === 'l3Daily') setL3SummaryModel(hardcoded[0]);
+                else setL3SummaryModelStrong(hardcoded[0]);
+            }
             setStatusMsg(`已加载 ${hardcoded.length} 个内置模型`);
             setShowModelModal(true);
             return;
         }
-        if (!localUrl) { setStatusMsg('请先填写 URL'); return; }
+        const url = target === 'main' ? localUrl : (l3SummaryUrl || localUrl);
+        const key = target === 'main' ? localKey : (l3SummaryKey || localKey);
+
+        if (!url) { setStatusMsg('请先填写 URL'); return; }
         setIsLoadingModels(true);
         setStatusMsg('正在连接...');
         try {
             // Use the centralized resolver to get the correct models URL and headers
             const resolved = resolveApiEndpoint({
                 ...apiConfig,
-                baseUrl: localUrl,
-                apiKey: localKey,
-                apiSource: localApiSource
+                baseUrl: url,
+                apiKey: key,
+                apiSource: source
             });
 
             const response = await fetch(resolved.modelsUrl, {
@@ -272,7 +317,11 @@ const Settings: React.FC = () => {
             if (Array.isArray(list)) {
                 const models = list.map((m: any) => m.id || m);
                 setAvailableModels(models);
-                if (models.length > 0 && !models.includes(localModel)) setLocalModel(models[0]);
+                if (models.length > 0 && !models.includes(targetModel)) {
+                    if (target === 'main') setLocalModel(models[0]);
+                    else if (target === 'l3Daily') setL3SummaryModel(models[0]);
+                    else setL3SummaryModelStrong(models[0]);
+                }
                 setStatusMsg(`获取到 ${models.length} 个模型`);
                 setShowModelModal(true);
             } else { setStatusMsg('格式不兼容'); }
@@ -704,11 +753,11 @@ const Settings: React.FC = () => {
                         <div className="pt-2">
                             <div className="flex justify-between items-center mb-1.5 pl-1">
                                 <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Model</label>
-                                <button onClick={fetchModels} disabled={isLoadingModels} className="text-[10px] text-primary font-bold">{isLoadingModels ? 'Fetching...' : '刷新模型列表'}</button>
+                                <button onClick={() => fetchModels('main')} disabled={isLoadingModels} className="text-[10px] text-primary font-bold">{isLoadingModels ? 'Fetching...' : '刷新模型列表'}</button>
                             </div>
 
                             <button
-                                onClick={() => setShowModelModal(true)}
+                                onClick={() => { setActiveModelTarget('main'); setShowModelModal(true); }}
                                 className="w-full bg-white/50 border border-slate-200/60 rounded-xl px-4 py-3 text-sm text-slate-700 flex justify-between items-center active:bg-white transition-all shadow-sm"
                             >
                                 <span className="truncate font-mono">{localModel || 'Select Model...'}</span>
@@ -912,6 +961,158 @@ const Settings: React.FC = () => {
                     </div>
                 </section>
 
+                {/* L3 记忆总结调度 */}
+                <section className="bg-white/60 backdrop-blur-sm rounded-3xl p-5 shadow-sm border border-white/50">
+                    <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-2">
+                            <div className="p-2 bg-purple-100/60 rounded-xl text-purple-600">
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
+                            </div>
+                            <h2 className="text-sm font-semibold text-slate-600 tracking-wider">记忆总结调度 (L3)</h2>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" checked={l3Enabled} onChange={e => setL3Enabled(e.target.checked)} className="sr-only peer" />
+                            <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-500"></div>
+                        </label>
+                    </div>
+                    <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                        自动生成每日/每周/每月 L3 记忆摘要，供 Agent 在对话中回顾近期动态。关闭后停止自动生成，已有摘要仍可使用。
+                    </p>
+                    {l3Enabled && (
+                        <div className="space-y-3">
+                            {/* Schedule: single base time */}
+                            <div className="bg-purple-50/60 rounded-2xl p-3">
+                                <div className="text-[10px] font-bold text-purple-500 uppercase tracking-wider mb-2">统一触发时间</div>
+                                <div className="flex items-center gap-3">
+                                    <div className="flex-1">
+                                        <label className="text-[10px] font-bold text-slate-400 block mb-1">小时 (0–23)</label>
+                                        <input
+                                            type="number" min={0} max={23} value={l3Hour}
+                                            onChange={e => setL3Hour(Math.max(0, Math.min(23, parseInt(e.target.value) || 0)))}
+                                            className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2 text-sm text-center font-mono"
+                                        />
+                                    </div>
+                                    <div className="text-slate-400 font-bold mt-4">:</div>
+                                    <div className="flex-1">
+                                        <label className="text-[10px] font-bold text-slate-400 block mb-1">分钟 (0–59)</label>
+                                        <input
+                                            type="number" min={0} max={59} value={l3Minute}
+                                            onChange={e => setL3Minute(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))}
+                                            className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2 text-sm text-center font-mono"
+                                        />
+                                    </div>
+                                </div>
+                                <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
+                                    设置一个时间即可。日报每天该时刻触发；周报每周一自动追加；月报每月 1 日自动追加。错过则启动时补算。
+                                </p>
+                            </div>
+                            {/* Dual model config */}
+                            <div className="bg-slate-50/80 rounded-2xl p-3 space-y-2.5">
+                                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">总结专用模型（双 API，可选）</div>
+                                <p className="text-[10px] text-slate-400 leading-relaxed">留空则复用主对话 API。配置后 daily 走轻量模型，weekly/monthly 走强模型，不影响主对话速度。</p>
+                                {/* Quick-fill from existing preset or main config */}
+                                <div className="flex gap-2">
+                                    {apiPresets.length > 0 && (
+                                        <select
+                                            className="flex-1 bg-white border border-slate-200 rounded-xl px-2 py-1.5 text-[10px] text-slate-600 appearance-none cursor-pointer"
+                                            defaultValue=""
+                                            onChange={e => {
+                                                const preset = apiPresets.find(p => p.id === e.target.value);
+                                                if (!preset) return;
+                                                setL3SummaryUrl(preset.config.baseUrl || '');
+                                                setL3SummaryKey(preset.config.apiKey || '');
+                                                setL3SummaryModel(preset.config.model || '');
+                                                setL3SummaryApiSource((preset.config as any).apiSource || 'openai_compatible');
+                                                e.target.value = '';
+                                            }}
+                                        >
+                                            <option value="" disabled>从预设加载...</option>
+                                            {apiPresets.map(p => (
+                                                <option key={p.id} value={p.id}>{p.name}</option>
+                                            ))}
+                                        </select>
+                                    )}
+                                    <button
+                                        onClick={() => {
+                                            setL3SummaryUrl(localUrl);
+                                            setL3SummaryKey(localKey);
+                                            setL3SummaryModel(localModel);
+                                            setL3SummaryApiSource(localApiSource);
+                                        }}
+                                        className="text-[10px] text-primary border border-primary/30 rounded-xl px-2 py-1.5 whitespace-nowrap"
+                                    >
+                                        复制主配置
+                                    </button>
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">接口来源 (API Source)</label>
+                                    <select
+                                        value={l3SummaryApiSource}
+                                        onChange={(e) => {
+                                            const newSource = e.target.value as ApiSource;
+                                            setL3SummaryApiSource(newSource);
+                                            const meta = API_SOURCE_REGISTRY[newSource];
+                                            if (meta?.defaultBaseUrl && !l3SummaryUrl) {
+                                                setL3SummaryUrl(meta.defaultBaseUrl);
+                                            }
+                                        }}
+                                        className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs focus:bg-white transition-all appearance-none cursor-pointer"
+                                    >
+                                        {Object.entries(API_SOURCE_REGISTRY).map(([key, meta]) => (
+                                            <option key={key} value={key}>{meta.label}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-slate-400 block mb-1">API Base URL</label>
+                                    <input type="text" value={l3SummaryUrl} onChange={e => setL3SummaryUrl(e.target.value)}
+                                        placeholder="留空则使用主对话 URL"
+                                        className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono" />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] font-bold text-slate-400 block mb-1">API Key</label>
+                                    <input type="password" autoComplete="new-password" value={l3SummaryKey} onChange={e => setL3SummaryKey(e.target.value)}
+                                        placeholder="留空则使用主对话 Key"
+                                        className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono" />
+                                </div>
+                                <div className="space-y-3 pt-2 mt-2 border-t border-slate-200/50">
+                                    <div>
+                                        <div className="flex justify-between items-center mb-1">
+                                            <label className="text-[10px] font-bold text-slate-400 block">常规总结模型 (如 gpt-4o-mini)</label>
+                                            <button onClick={() => fetchModels('l3Daily')} className="text-[9px] text-primary">{isLoadingModels && activeModelTarget === 'l3Daily' ? '...' : '刷新模型列表'}</button>
+                                        </div>
+                                        <button
+                                            onClick={() => { setActiveModelTarget('l3Daily'); setShowModelModal(true); }}
+                                            className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 flex justify-between items-center"
+                                        >
+                                            <span className="truncate font-mono">{l3SummaryModel || '未配置 (默认跟从主对话模型)...'}</span>
+                                        </button>
+                                    </div>
+                                    <div>
+                                        <div className="flex justify-between items-center mb-1">
+                                            <label className="text-[10px] font-bold text-slate-400 block">高级归纳模型 (周报/月报，可选)</label>
+                                            <button onClick={() => fetchModels('l3Strong')} className="text-[9px] text-primary">{isLoadingModels && activeModelTarget === 'l3Strong' ? '...' : '刷新模型列表'}</button>
+                                        </div>
+                                        <button
+                                            onClick={() => { setActiveModelTarget('l3Strong'); setShowModelModal(true); }}
+                                            className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 flex justify-between items-center"
+                                        >
+                                            <span className="truncate font-mono">{l3SummaryModelStrong || '未配置 (默认复用常规总结模型)...'}</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    <button
+                        onClick={handleSaveApi}
+                        disabled={isSavingApi}
+                        className={`w-full py-2.5 mt-3 rounded-xl text-xs font-bold transition-all ${isSavingApi ? 'bg-purple-200 text-purple-500' : 'bg-purple-500 text-white shadow-md shadow-purple-200 active:scale-95'}`}
+                    >
+                        {isSavingApi ? '保存中...' : '保存记忆总结配置'}
+                    </button>
+                </section>
+
                 {/* Workspace 导出区域 */}
                 <section className="bg-white/60 backdrop-blur-sm rounded-3xl p-5 shadow-sm border border-white/50">
                     <div className="flex items-center gap-2 mb-4">
@@ -941,8 +1142,12 @@ const Settings: React.FC = () => {
                         <div className="flex gap-2">
                             <input
                                 type="text"
-                                value={localModel}
-                                onChange={(e) => setLocalModel(e.target.value)}
+                                value={activeModelTarget === 'main' ? localModel : (activeModelTarget === 'l3Daily' ? l3SummaryModel : l3SummaryModelStrong)}
+                                onChange={(e) => {
+                                    if (activeModelTarget === 'main') setLocalModel(e.target.value);
+                                    else if (activeModelTarget === 'l3Daily') setL3SummaryModel(e.target.value);
+                                    else setL3SummaryModelStrong(e.target.value);
+                                }}
                                 placeholder="如: ep-20250215... 或 gpt-4o"
                                 className="flex-1 bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-mono focus:outline-primary"
                             />
@@ -960,12 +1165,20 @@ const Settings: React.FC = () => {
                     </div>
 
                     <div className="max-h-[40vh] overflow-y-auto no-scrollbar space-y-2">
-                        {availableModels.length > 0 ? availableModels.map(m => (
-                            <button key={m} onClick={() => { setLocalModel(m); setShowModelModal(false); }} className={`w-full text-left px-4 py-3 rounded-xl text-sm font-mono flex justify-between items-center ${m === localModel ? 'bg-primary/10 text-primary font-bold ring-1 ring-primary/20' : 'bg-white border border-slate-100 text-slate-600 hover:bg-slate-50'}`}>
-                                <span className="truncate">{m}</span>
-                                {m === localModel && <div className="w-2 h-2 rounded-full bg-primary"></div>}
-                            </button>
-                        )) : (
+                        {availableModels.length > 0 ? availableModels.map(m => {
+                            const isSelected = activeModelTarget === 'main' ? m === localModel : (activeModelTarget === 'l3Daily' ? m === l3SummaryModel : m === l3SummaryModelStrong);
+                            return (
+                                <button key={m} onClick={() => {
+                                    if (activeModelTarget === 'main') setLocalModel(m);
+                                    else if (activeModelTarget === 'l3Daily') setL3SummaryModel(m);
+                                    else setL3SummaryModelStrong(m);
+                                    setShowModelModal(false);
+                                }} className={`w-full text-left px-4 py-3 rounded-xl text-sm font-mono flex justify-between items-center ${isSelected ? 'bg-primary/10 text-primary font-bold ring-1 ring-primary/20' : 'bg-white border border-slate-100 text-slate-600 hover:bg-slate-50'}`}>
+                                    <span className="truncate">{m}</span>
+                                    {isSelected && <div className="w-2 h-2 rounded-full bg-primary"></div>}
+                                </button>
+                            );
+                        }) : (
                             <div className="text-center text-slate-400 py-4 text-xs">
                                 未检测到在线模型列表，请上方手动输入。
                             </div>

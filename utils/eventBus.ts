@@ -11,11 +11,16 @@ export interface AppEvent {
     app: string;        // "DailyWhisper"
     action: string;     // "生成私语"
     detail?: string;    // 可选的简短描述 (≤ 30 chars)
+    refType?: string;   // 业务锚点类型，例如 diary/task/photo
+    refId?: string;     // 业务对象主键
+    importance?: number;// 0~1 重要性评分（可选）
+    source?: 'user' | 'agent' | 'system';
     timestamp: number;  // Date.now()
 }
 
 const MAX_EVENTS = 50;
 const events: AppEvent[] = [];
+const listeners = new Set<(event: AppEvent) => void>();
 
 function formatTime(date: Date): string {
     return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
@@ -26,18 +31,34 @@ export const EventBus = {
     /**
      * 上报一条用户行为事件
      */
-    emit(app: string, action: string, detail?: string): void {
+    emit(
+        app: string,
+        action: string,
+        detail?: string,
+        extra?: Partial<Pick<AppEvent, 'refType' | 'refId' | 'importance' | 'source'>>,
+    ): void {
         const event: AppEvent = {
             time: formatTime(new Date()),
             app,
             action,
             detail: detail ? detail.slice(0, 30) : undefined,
+            refType: extra?.refType,
+            refId: extra?.refId,
+            importance: typeof extra?.importance === 'number' ? Math.max(0, Math.min(1, extra.importance)) : undefined,
+            source: extra?.source || 'user',
             timestamp: Date.now(),
         };
         events.push(event);
         if (events.length > MAX_EVENTS) {
             events.shift(); // 环形覆盖
         }
+        listeners.forEach(listener => {
+            try {
+                listener(event);
+            } catch {
+                // keep EventBus robust even if listener fails
+            }
+        });
     },
 
     /**
@@ -79,5 +100,10 @@ export const EventBus = {
      */
     clear(): void {
         events.length = 0;
+    },
+
+    subscribe(listener: (event: AppEvent) => void): () => void {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
     }
 };

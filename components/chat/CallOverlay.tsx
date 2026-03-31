@@ -220,10 +220,11 @@ const CallOverlay: React.FC<CallOverlayProps> = ({
     const pauseValue = clampNumber(apiConfig.callPauseThreshold, CALL_PAUSE_MIN, CALL_PAUSE_MAX, DEFAULT_CALL_PAUSE_THRESHOLD);
     const segmentValue = clampNumber(apiConfig.callSegmentDuration, CALL_SEGMENT_MIN, CALL_SEGMENT_MAX, DEFAULT_CALL_SEGMENT_DURATION);
     const asrProviderValue = apiConfig.callAsrProvider || 'faster-whisper';
-    const webSpeechMinDb = clampNumber(apiConfig.webSpeechMinVolume, WEB_SPEECH_DB_MIN, WEB_SPEECH_DB_MAX, -30);
+    const webSpeechMinDb = clampNumber(apiConfig.webSpeechMinVolume, WEB_SPEECH_DB_MIN, WEB_SPEECH_DB_MAX, -45);
     const volumeDb = toDb(callVolumeLevel);
-    const volumeRatio = Math.min(1, Math.max(0, (volumeDb - WEB_SPEECH_DB_MIN) / (WEB_SPEECH_DB_MAX - WEB_SPEECH_DB_MIN)));
-    const belowWebSpeechThreshold = asrProviderValue === 'web-speech' && volumeDb < webSpeechMinDb;
+    const hasWebSpeechSignal = volumeDb > (WEB_SPEECH_DB_MIN + 1);
+    const belowWebSpeechThreshold = asrProviderValue === 'web-speech' && hasWebSpeechSignal && volumeDb < webSpeechMinDb;
+    const noWebSpeechSignal = asrProviderValue === 'web-speech' && !hasWebSpeechSignal;
     const [draftPause, setDraftPause] = useState(pauseValue);
     const [draftSegment, setDraftSegment] = useState(segmentValue);
     const [draftAsrProvider, setDraftAsrProvider] = useState<'web-speech' | 'faster-whisper' | 'bytedance'>(asrProviderValue);
@@ -236,10 +237,13 @@ const CallOverlay: React.FC<CallOverlayProps> = ({
     const [draftBytItn, setDraftBytItn] = useState(apiConfig.bytedanceAsrEnableItn ?? true);
     const [draftBytEmotion, setDraftBytEmotion] = useState(apiConfig.bytedanceAsrEnableEmotion ?? false);
     const [draftBytAucBaseUrl, setDraftBytAucBaseUrl] = useState(apiConfig.bytedanceAucPublicBaseUrl || '');
-    const [draftWebSpeechLang, setDraftWebSpeechLang] = useState(apiConfig.webSpeechLanguage || 'zh-CN');
-    const [draftWebSpeechInterim, setDraftWebSpeechInterim] = useState(apiConfig.webSpeechInterim ?? true);
-    const [draftWebSpeechContinuous, setDraftWebSpeechContinuous] = useState(apiConfig.webSpeechContinuous ?? true);
     const [draftWebSpeechMinVolume, setDraftWebSpeechMinVolume] = useState(webSpeechMinDb);
+    const liveWebSpeechDelta = Math.round(volumeDb - webSpeechMinDb);
+    const liveWebSpeechHint = !hasWebSpeechSignal
+        ? `实时输入 ${Math.round(volumeDb)} dB · 等待声音输入`
+        : liveWebSpeechDelta >= 0
+            ? `实时输入 ${Math.round(volumeDb)} dB · 已达到识别阈值`
+            : `实时输入 ${Math.round(volumeDb)} dB · 声音偏弱`;
 
     useEffect(() => {
         if (!isComposing) setLocalInput(callInput);
@@ -264,10 +268,7 @@ const CallOverlay: React.FC<CallOverlayProps> = ({
         setDraftBytItn(apiConfig.bytedanceAsrEnableItn ?? true);
         setDraftBytEmotion(apiConfig.bytedanceAsrEnableEmotion ?? false);
         setDraftBytAucBaseUrl(apiConfig.bytedanceAucPublicBaseUrl || '');
-        setDraftWebSpeechLang(apiConfig.webSpeechLanguage || 'zh-CN');
-        setDraftWebSpeechInterim(apiConfig.webSpeechInterim ?? true);
-        setDraftWebSpeechContinuous(apiConfig.webSpeechContinuous ?? true);
-        setDraftWebSpeechMinVolume(clampNumber(apiConfig.webSpeechMinVolume, WEB_SPEECH_DB_MIN, WEB_SPEECH_DB_MAX, -30));
+        setDraftWebSpeechMinVolume(clampNumber(apiConfig.webSpeechMinVolume, WEB_SPEECH_DB_MIN, WEB_SPEECH_DB_MAX, -45));
     }, [
         asrProviderValue,
         apiConfig.bytedanceAsrAppKey,
@@ -279,9 +280,6 @@ const CallOverlay: React.FC<CallOverlayProps> = ({
         apiConfig.bytedanceAsrEnableItn,
         apiConfig.bytedanceAsrEnableEmotion,
         apiConfig.bytedanceAucPublicBaseUrl,
-        apiConfig.webSpeechLanguage,
-        apiConfig.webSpeechInterim,
-        apiConfig.webSpeechContinuous,
         apiConfig.webSpeechMinVolume
     ]);
 
@@ -467,48 +465,9 @@ const CallOverlay: React.FC<CallOverlayProps> = ({
                                 {draftAsrProvider === 'web-speech' && (
                                     <div className="space-y-3">
                                         <div className="text-[11px] text-white/45">浏览器内置识别，受系统/浏览器限制。</div>
-                                        <div className="space-y-1.5">
-                                            <div className="text-xs text-white/50">语言 (可选)</div>
-                                            <input
-                                                value={draftWebSpeechLang}
-                                                onChange={(e) => {
-                                                    const next = e.target.value.trim();
-                                                    setDraftWebSpeechLang(next);
-                                                    updateApiConfig({ webSpeechLanguage: next });
-                                                }}
-                                                className="w-full bg-white/90 text-slate-900 placeholder:text-slate-400 rounded-lg px-3 py-2 text-xs font-mono outline-none"
-                                                placeholder="zh-CN"
-                                            />
-                                        </div>
-                                        <div className="flex items-center justify-between text-xs text-white/70">
-                                            <span>中间结果</span>
-                                            <button
-                                                onClick={() => {
-                                                    const next = !draftWebSpeechInterim;
-                                                    setDraftWebSpeechInterim(next);
-                                                    updateApiConfig({ webSpeechInterim: next });
-                                                }}
-                                                className={`px-3 py-1 rounded-full text-[11px] font-bold ${draftWebSpeechInterim ? 'bg-emerald-400/80 text-emerald-900' : 'bg-white/10 text-white/60'}`}
-                                            >
-                                                {draftWebSpeechInterim ? '开启' : '关闭'}
-                                            </button>
-                                        </div>
-                                        <div className="flex items-center justify-between text-xs text-white/70">
-                                            <span>连续识别</span>
-                                            <button
-                                                onClick={() => {
-                                                    const next = !draftWebSpeechContinuous;
-                                                    setDraftWebSpeechContinuous(next);
-                                                    updateApiConfig({ webSpeechContinuous: next });
-                                                }}
-                                                className={`px-3 py-1 rounded-full text-[11px] font-bold ${draftWebSpeechContinuous ? 'bg-emerald-400/80 text-emerald-900' : 'bg-white/10 text-white/60'}`}
-                                            >
-                                                {draftWebSpeechContinuous ? '开启' : '关闭'}
-                                            </button>
-                                        </div>
                                         <div className="space-y-2">
                                             <div className="flex items-center justify-between text-xs text-white/70">
-                                                <span>采集音量阈值</span>
+                                                <span>识别阈值</span>
                                                 <span className="text-white/50">{Math.round(draftWebSpeechMinVolume)} dB</span>
                                             </div>
                                             <input
@@ -524,27 +483,10 @@ const CallOverlay: React.FC<CallOverlayProps> = ({
                                                 }}
                                                 className="w-full accent-emerald-400"
                                             />
-                                            <div className="space-y-2">
-                                                <div className="flex items-center justify-between text-[10px] text-white/45">
-                                                    <span>当前音量</span>
-                                                    <span>{Number.isFinite(volumeDb) ? `${Math.round(volumeDb)} dB` : '--'}</span>
-                                                </div>
-                                                <div className="relative h-2 rounded-full bg-white/10 overflow-hidden">
-                                                    <div
-                                                        className="h-full bg-emerald-400/70 transition-all"
-                                                        style={{ width: `${Math.round(volumeRatio * 100)}%` }}
-                                                    />
-                                                    <div
-                                                        className="absolute top-0 h-full w-0.5 bg-white/70"
-                                                        style={{ left: `${Math.round(((draftWebSpeechMinVolume - WEB_SPEECH_DB_MIN) / (WEB_SPEECH_DB_MAX - WEB_SPEECH_DB_MIN)) * 100)}%` }}
-                                                    />
-                                                </div>
-                                                <div className={`text-[10px] ${volumeDb < draftWebSpeechMinVolume ? 'text-amber-300' : 'text-white/40'}`}>
-                                                    {volumeDb < draftWebSpeechMinVolume ? '当前音量低于阈值，可能不会触发识别。' : '低于阈值的环境音会被忽略。'}
-                                                </div>
+                                            <div className="text-[10px] text-white/35">
+                                                阈值越接近 0 dB 越敏感，越接近 -60 dB 越不敏感。
                                             </div>
                                         </div>
-                                        <div className="text-[10px] text-white/40">停顿阈值使用上面的“停顿阈值”设置。</div>
                                     </div>
                                 )}
 
@@ -923,13 +865,11 @@ const CallOverlay: React.FC<CallOverlayProps> = ({
 
                             {/* 语音模式状态提示 */}
                             {callInputMode === 'voice' && (
-                                <div className={`text-center text-[11px] ${asrProviderValue === 'web-speech' && !callMicMuted && belowWebSpeechThreshold ? 'text-amber-300' : 'text-white/35'}`}>
+                                <div className={`text-center text-[11px] ${asrProviderValue === 'web-speech' && !callMicMuted && (belowWebSpeechThreshold || noWebSpeechSignal) ? 'text-amber-300' : 'text-white/35'}`}>
                                     {callMicMuted
                                         ? '麦克风已关闭'
                                         : asrProviderValue === 'web-speech'
-                                            ? (belowWebSpeechThreshold
-                                                ? `音量低于阈值 · ${Math.round(volumeDb)} dB`
-                                                : `正在监听 · ${Math.round(volumeDb)} dB`)
+                                            ? liveWebSpeechHint
                                             : callMicActive
                                                 ? `正在收音 · ${Math.round(callVolumeLevel * 100)}%`
                                                 : '麦克风准备就绪'}

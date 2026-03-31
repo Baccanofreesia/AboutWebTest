@@ -4,6 +4,7 @@ import { useOS } from '../context/OSContext';
 import { fsBridge } from '../utils/fsBridge';
 import Modal from '../components/os/Modal';
 import { DB } from '../utils/db';
+import { FileIndex } from '../utils/fileIndex';
 
 type AlbumInfo = {
     name: string;
@@ -72,6 +73,44 @@ const Gallery: React.FC = () => {
     const { closeApp, apiConfig, addToast } = useOS();
     const galleryRootPath = apiConfig.galleryWorkspacePath?.trim() || '';
     const allowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+    const indexRootPath = apiConfig.nativeWorkspacePath?.trim() || galleryRootPath;
+
+    const trackGalleryUpsert = async (path: string, reason: string) => {
+        if (!indexRootPath) return;
+        await FileIndex.trackFileUpsert({
+            indexRootPath,
+            allowGlobal,
+            scope: 'gallery',
+            path,
+            actor: 'user',
+            reason,
+        }).catch(() => { });
+    };
+
+    const trackGalleryMove = async (fromPath: string, toPath: string, reason: string) => {
+        if (!indexRootPath) return;
+        await FileIndex.trackFileMove({
+            indexRootPath,
+            allowGlobal,
+            scope: 'gallery',
+            fromPath,
+            toPath,
+            actor: 'user',
+            reason,
+        }).catch(() => { });
+    };
+
+    const trackGalleryDelete = async (path: string, reason: string) => {
+        if (!indexRootPath) return;
+        await FileIndex.trackFileDelete({
+            indexRootPath,
+            allowGlobal,
+            scope: 'gallery',
+            path,
+            actor: 'user',
+            reason,
+        }).catch(() => { });
+    };
 
     const [albums, setAlbums] = useState<AlbumInfo[]>([]);
     const [photos, setPhotos] = useState<PhotoFile[]>([]);
@@ -265,7 +304,11 @@ const Gallery: React.FC = () => {
     const handleDeleteAlbum = async (album: AlbumInfo) => {
         if (!galleryRootPath) return;
         try {
+            const albumPhotos = photos.filter(p => p.path.startsWith(album.path));
             await fsBridge.deleteFile(galleryRootPath, toRelPath(album.path), allowGlobal);
+            for (const photo of albumPhotos) {
+                await trackGalleryDelete(photo.path, 'gallery_delete_album');
+            }
             if (activeAlbum === album.name) setActiveAlbum('all');
             addToast('相册已删除', 'info');
             await scanGallery();
@@ -283,12 +326,19 @@ const Gallery: React.FC = () => {
         }
         const clean = raw.replace(/[\\/:*?"<>|]/g, '_');
         try {
+            const oldPrefix = showRenameAlbum.path;
+            const newPrefix = `/${clean}/`;
+            const affected = photos.filter(p => p.path.startsWith(oldPrefix));
             await fsBridge.renameFile(
                 galleryRootPath,
                 toRelPath(showRenameAlbum.path),
                 toRelPath(`/${clean}/`),
                 allowGlobal
             );
+            for (const photo of affected) {
+                const nextPath = photo.path.replace(oldPrefix, newPrefix);
+                await trackGalleryMove(photo.path, nextPath, 'gallery_rename_album');
+            }
             if (activeAlbum === showRenameAlbum.name) setActiveAlbum(clean);
             setShowRenameAlbum(null);
             setRenamingAlbumName('');
@@ -341,6 +391,7 @@ const Gallery: React.FC = () => {
                 }
                 const targetPath = `${uploadTargetPath}${safeName}`;
                 await fsBridge.writeFileBase64(galleryRootPath, toRelPath(targetPath), base64, allowGlobal);
+                await trackGalleryUpsert(targetPath, 'gallery_upload_media');
                 await DB.saveImageDetail({
                     fileName: safeName,
                     detail: (uploadDetails[item.id] || '').trim().slice(0, 30),
@@ -367,6 +418,7 @@ const Gallery: React.FC = () => {
         if (!galleryRootPath) return;
         try {
             await fsBridge.deleteFile(galleryRootPath, toRelPath(photo.path), allowGlobal);
+            await trackGalleryDelete(photo.path, 'gallery_delete_photo');
             if (selectedPhoto?.path === photo.path) setSelectedPhoto(null);
             addToast('媒体文件已删除', 'info');
             await scanGallery();
@@ -394,6 +446,7 @@ const Gallery: React.FC = () => {
                 toRelPath(nextPath),
                 allowGlobal
             );
+            await trackGalleryMove(showRenamePhoto.path, nextPath, 'gallery_rename_photo');
             setShowRenamePhoto(null);
             setRenamingPhotoName('');
             addToast('媒体文件已重命名', 'success');
@@ -417,6 +470,7 @@ const Gallery: React.FC = () => {
         const ext = extOf(targetName);
         const base = targetName.replace(/\.[^/.]+$/, '');
         const targetPath = `${targetDir}${targetName}`;
+        let finalPath = targetPath;
 
         try {
             await fsBridge.renameFile(
@@ -427,6 +481,7 @@ const Gallery: React.FC = () => {
             );
         } catch {
             const conflictPath = `${targetDir}${base}-${Date.now()}${ext}`;
+            finalPath = conflictPath;
             await fsBridge.renameFile(
                 galleryRootPath,
                 toRelPath(showMovePhoto.path),
@@ -434,6 +489,7 @@ const Gallery: React.FC = () => {
                 allowGlobal
             );
         }
+        await trackGalleryMove(showMovePhoto.path, finalPath, 'gallery_move_photo');
 
         setShowMovePhoto(null);
         if (selectedPhoto?.path === showMovePhoto.path) setSelectedPhoto(null);

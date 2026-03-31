@@ -71,7 +71,7 @@ export interface UseCronEngineOptions {
     apiConfig: APIConfig;
     agentName: string;
     userName: string;
-    onCronMessage: (content: string) => void;  // callback to push assistant message to chat
+    onCronMessage: (content: string, meta?: Record<string, unknown>) => void;
     enabled: boolean;
 }
 
@@ -111,13 +111,13 @@ export function useCronEngine(opts: UseCronEngineOptions) {
 
             const resolved = resolveApiEndpoint(apiConfig);
             let requestBody: any = {
-                    model: apiConfig.model,
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: `[CRON TASK: ${job.name}]\n${job.prompt}` },
-                    ],
-                    temperature: 0.7,
-                };
+                model: apiConfig.model,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: `[CRON TASK: ${job.name}]\n${job.prompt}` },
+                ],
+                temperature: 0.7,
+            };
             if (resolved.transformBody) requestBody = resolved.transformBody(requestBody);
             const response = await fetch(resolved.chatUrl, {
                 method: 'POST',
@@ -129,7 +129,7 @@ export function useCronEngine(opts: UseCronEngineOptions) {
                 const data = await response.json();
                 const text = data.choices?.[0]?.message?.content?.trim();
                 if (text) {
-                    optsRef.current.onCronMessage(text);
+                    optsRef.current.onCronMessage(text, { triggerSource: `cron:${job.id}`, cronJobName: job.name });
                 }
             }
 

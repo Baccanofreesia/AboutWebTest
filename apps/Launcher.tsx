@@ -5,6 +5,8 @@ import AppIcon from '../components/os/AppIcon';
 import { DB } from '../utils/db';
 import { CharacterProfile, AppConfig } from '../types';
 import { motion, AnimatePresence } from 'framer-motion';
+import { AppRegistry } from '../utils/appRegistry';
+import { ActionDispatcher } from '../utils/actionDispatcher';
 
 const APPS_PER_PAGE = 20;
 const GRID_COLS = 4;
@@ -77,9 +79,11 @@ const Launcher: React.FC = () => {
             try {
                 const agentModules = (import.meta as any).glob('./agent_apps/*.tsx');
                 const apps: AppConfig[] = [];
+                const presentDynamicIds: string[] = [];
                 for (const path in agentModules) {
                     const fileName = path.split('/').pop()?.replace('.tsx', '');
                     if (fileName) {
+                        presentDynamicIds.push(fileName);
                         apps.push({
                             id: fileName as any,
                             name: fileName,
@@ -88,6 +92,17 @@ const Launcher: React.FC = () => {
                         });
                     }
                 }
+
+                // active IDs from Vite glob scan; trashed IDs come from disk registry (loaded in AppRegistry.initialize)
+                AppRegistry.reconcileDynamicApps(presentDynamicIds, [], {
+                    defaultCapabilities: ['query_index', 'read_ref', 'search', 'resolve_file'],
+                    restoredDescriptionBuilder: (appId) => `${appId} - Agent dynamic app`,
+                });
+
+                presentDynamicIds.forEach((appId) => {
+                    const caps = AppRegistry.getCapabilities(appId);
+                    ActionDispatcher.registerCapabilitiesForApp(appId, caps);
+                });
                 setDynamicApps(apps);
             } catch (e) {
                 console.error('Failed to load agent apps', e);
@@ -218,6 +233,7 @@ const Launcher: React.FC = () => {
         const slotIdx = slotIndexAt(clientX, clientY, gridEl, base[pageIdx].length);
         const next = base.map(page => [...page]);
         next[pageIdx].splice(slotIdx, 0, id);
+        previewPagesRef.current = next;
         setPreviewPages(next);
         dropTargetPageRef.current = pageIdx;
     }, [slotIndexAt]);
@@ -254,6 +270,7 @@ const Launcher: React.FC = () => {
             setAppPages(next);
             finalPage = Math.max(0, Math.min(dropTargetPageRef.current, next.length - 1));
         }
+        previewPagesRef.current = null;
         setPreviewPages(null);
         setDraggingId(null);
         setGhostPos(null);
@@ -274,6 +291,7 @@ const Launcher: React.FC = () => {
         setIsEditMode(true);
         setDraggingId(id);
         setGhostPos({ x, y });
+        previewPagesRef.current = null;
         setPreviewPages(null);
         dropTargetPageRef.current = currentPageRef.current;
     }, []);
@@ -383,7 +401,11 @@ const Launcher: React.FC = () => {
         if (!isEditMode || draggingIdRef.current) return;
         const target = e.target as HTMLElement;
         if (target.closest('[data-app-icon="true"]')) return;
-        persistLayoutNow(appPagesRef.current);
+        const pendingPages = (previewPagesRef.current ?? appPagesRef.current).map(page => [...page]);
+        persistLayoutNow(pendingPages);
+        setAppPages(pendingPages);
+        previewPagesRef.current = null;
+        setPreviewPages(null);
         setIsEditMode(false);
     }, [isEditMode, persistLayoutNow]);
 
@@ -499,7 +521,10 @@ const Launcher: React.FC = () => {
                                                 } : { rotate: 0 }}
                                                 onPointerDown={(e) => onPointerDown(e, appId)}
                                                 onPointerMove={onPointerMovePre}
-                                                onPointerUp={clearLongPress}
+                                                onPointerUp={() => {
+                                                    clearLongPress();
+                                                    if (draggingIdRef.current === appId) endDrag();
+                                                }}
                                             >
                                                 <AppIcon
                                                     app={app}

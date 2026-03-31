@@ -1,8 +1,14 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { useOS } from '../context/OSContext';
-import { MemoryFragment, UserImpression, AgentProfile } from '../types';
+import { MemoryFragment, UserImpression, AgentProfile, CoreProposal, CoreProposalCategory } from '../types';
 import { DB } from '../utils/db';
 import { fsBridge } from '../utils/fsBridge';
+import { writeProposalAudit } from '../utils/memoryDaily';
+import { recordProfileApproval, buildProfilesBlurb } from '../utils/memoryProfiles';
+import { backfillL2FromDB } from '../utils/memoryArchive';
+import { FileIndex } from '../utils/fileIndex';
+import { AppRegistry, DynamicAppCapability, DynamicAppTombstone } from '../utils/appRegistry';
+import { ActionDispatcher } from '../utils/actionDispatcher';
 import Modal from '../components/os/Modal';
 
 // --- Reusable Components Extracted from Character.tsx ---
@@ -315,7 +321,7 @@ const MemoryArchivist: React.FC<MemoryArchivistProps> = ({ memories, refinedMemo
 
 // --- CheckPhone App Main Shell (SULLYTEST2-style Grid Launcher) ---
 
-type PanelType = 'grid' | 'dashboard' | 'memories' | 'impression' | 'workspace' | 'skills' | 'permissions' | 'cron';
+type PanelType = 'grid' | 'dashboard' | 'memories' | 'impression' | 'workspace' | 'skills' | 'permissions' | 'cron' | 'review' | 'app_manager';
 
 // --- AppIcon Component (from SULLYTEST2) ---
 const AppIcon: React.FC<{ icon: string; color: string; label: string; onClick: () => void }> = ({ icon, color, label, onClick }) => (
@@ -336,6 +342,66 @@ const CheckPhoneApp: React.FC = () => {
     const { closeApp, characters, updateCharacter, userProfile, addToast, apiConfig } = useOS();
     const [activePanel, setActivePanel] = useState<PanelType>('grid');
     const [isGeneratingImpression, setIsGeneratingImpression] = useState(false);
+    const [isBackfilling, setIsBackfilling] = useState(false);
+
+    // --- App Manager state ---
+    const [appMgrApps, setAppMgrApps] = useState<DynamicAppCapability[]>([]);
+    const [appMgrTombstones, setAppMgrTombstones] = useState<DynamicAppTombstone[]>([]);
+    const [confirmPermDelete, setConfirmPermDelete] = useState<string | null>(null);
+
+    const refreshAppMgr = () => {
+        setAppMgrApps(AppRegistry.getDynamicAppCapabilities());
+        setAppMgrTombstones(AppRegistry.getDynamicAppTombstones());
+    };
+
+    const handleTrashApp = async (appId: string) => {
+        const wsRoot = apiConfig?.nativeWorkspacePath?.trim() || '';
+        const wsAllow = !!apiConfig?.securityPolicy?.allowGlobalFileAccess;
+        try {
+            if (wsRoot) {
+                const content = await fsBridge.readFile(wsRoot, `@agent_apps/${appId}.tsx`, wsAllow).catch(() => '');
+                if (content) {
+                    await fsBridge.createFolder(wsRoot, '@agent_apps/.trash', wsAllow).catch(() => { });
+                    await fsBridge.writeFile(wsRoot, `@agent_apps/.trash/${appId}.tsx`, content, wsAllow);
+                    await fsBridge.deleteFile(wsRoot, `@agent_apps/${appId}.tsx`, wsAllow);
+                }
+            }
+            AppRegistry.trashApp(appId, { trashedBy: 'user', reason: '用户移入垃圾箱' });
+            refreshAppMgr();
+            addToast(`${appId} 已移入垃圾箱`, 'info');
+        } catch (e: any) { addToast(`操作失败: ${e.message}`, 'error'); }
+    };
+
+    const handleRestoreApp = async (appId: string) => {
+        const wsRoot = apiConfig?.nativeWorkspacePath?.trim() || '';
+        const wsAllow = !!apiConfig?.securityPolicy?.allowGlobalFileAccess;
+        try {
+            if (wsRoot) {
+                const content = await fsBridge.readFile(wsRoot, `@agent_apps/.trash/${appId}.tsx`, wsAllow).catch(() => '');
+                if (content) {
+                    await fsBridge.writeFile(wsRoot, `@agent_apps/${appId}.tsx`, content, wsAllow);
+                    await fsBridge.deleteFile(wsRoot, `@agent_apps/.trash/${appId}.tsx`, wsAllow);
+                }
+            }
+            AppRegistry.restoreApp(appId);
+            refreshAppMgr();
+            addToast(`${appId} 已恢复`, 'success');
+        } catch (e: any) { addToast(`操作失败: ${e.message}`, 'error'); }
+    };
+
+    const handlePermDeleteApp = async (appId: string) => {
+        const wsRoot = apiConfig?.nativeWorkspacePath?.trim() || '';
+        const wsAllow = !!apiConfig?.securityPolicy?.allowGlobalFileAccess;
+        try {
+            if (wsRoot) {
+                await fsBridge.deleteFile(wsRoot, `@agent_apps/.trash/${appId}.tsx`, wsAllow).catch(() => { });
+            }
+            AppRegistry.permanentlyDeleteApp(appId, { deletedBy: 'user', reason: '用户彻底删除' });
+            setConfirmPermDelete(null);
+            refreshAppMgr();
+            addToast(`${appId} 已彻底删除`, 'info');
+        } catch (e: any) { addToast(`操作失败: ${e.message}`, 'error'); }
+    };
 
     // --- Permissions state ---
     const [perms, setPerms] = useState({ notify: true, sysSettings: true, network: false });
@@ -390,7 +456,16 @@ const CheckPhoneApp: React.FC = () => {
                         <div className="absolute -top-10 -right-10 w-40 h-40 bg-green-50 rounded-full blur-3xl"></div>
                         <div className="relative z-10 flex items-center gap-5">
                             <div className="relative">
-                                <img src={agent?.avatar || 'https://api.dicebear.com/7.x/notionists/svg?seed=nova'} className="w-16 h-16 rounded-2xl object-cover shadow-sm ring-2 ring-white" alt="Avatar" />
+                                <img
+                                    src={agent?.displayAvatar || agent?.avatar || 'https://api.dicebear.com/7.x/notionists/svg?seed=nova'}
+                                    className="w-16 h-16 rounded-2xl object-cover shadow-sm ring-2 ring-white"
+                                    alt="Avatar"
+                                    onError={(e) => {
+                                        const img = e.currentTarget;
+                                        const fallback = 'https://api.dicebear.com/7.x/notionists/svg?seed=nova';
+                                        if (img.src !== fallback) img.src = fallback;
+                                    }}
+                                />
                                 <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-green-500 rounded-full border-2 border-white ring-2 ring-green-100 animate-pulse"></div>
                             </div>
                             <div>
@@ -412,15 +487,29 @@ const CheckPhoneApp: React.FC = () => {
                             <div className="text-slate-400"><span className="text-xs font-bold uppercase tracking-widest">近期动态</span></div>
                             <div className="flex items-end justify-between"><span className="text-3xl font-light text-slate-800 font-mono">{dynamicCount}</span><span className="text-[10px] text-blue-500 bg-blue-50 px-2 py-1 rounded-md">L3a</span></div>
                         </div>
-                        <div className="bg-white p-5 rounded-3xl border border-slate-100 shadow-sm flex flex-col justify-between h-28">
+                        <button onClick={() => setActivePanel('review')} className="bg-white p-5 rounded-3xl border border-slate-100 shadow-sm flex flex-col justify-between h-28 text-left w-full active:scale-95 transition-transform hover:border-amber-200">
                             <div className="text-slate-400"><span className="text-xs font-bold uppercase tracking-widest">待审提案</span></div>
-                            <div className="flex items-end justify-between"><span className="text-3xl font-light text-slate-800 font-mono">{pendingProposals}</span><span className="text-[10px] text-amber-500 bg-amber-50 px-2 py-1 rounded-md">Pending</span></div>
-                        </div>
+                            <div className="flex items-end justify-between"><span className="text-3xl font-light text-slate-800 font-mono">{pendingProposals}</span><span className="text-[10px] text-amber-500 bg-amber-50 px-2 py-1 rounded-md">→ 审阅</span></div>
+                        </button>
                         <div className="bg-white p-5 rounded-3xl border border-slate-100 shadow-sm flex flex-col justify-between h-28">
                             <div className="text-slate-400"><span className="text-xs font-bold uppercase tracking-widest">安全评级</span></div>
                             <div className="flex items-end justify-between"><span className="text-2xl font-bold text-slate-800">Safe</span><span className="text-[10px] text-emerald-600 bg-emerald-50 px-2 py-1 rounded-md">Level 1</span></div>
                         </div>
                     </div>
+                    {/* Historical Backfill */}
+                    <button
+                        onClick={handleBackfillL2}
+                        disabled={isBackfilling || !workspaceRoot}
+                        className="w-full bg-white rounded-3xl p-5 border border-slate-100 shadow-sm flex items-center justify-between active:scale-95 transition-transform disabled:opacity-50"
+                    >
+                        <div className="text-left">
+                            <p className="text-xs font-bold uppercase tracking-widest text-slate-400">历史补录</p>
+                            <p className="text-sm text-slate-600 mt-1">将配置前的聊天记录补写入 L2</p>
+                        </div>
+                        <span className="text-[10px] text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-full font-bold">
+                            {isBackfilling ? '补录中…' : '一次性'}
+                        </span>
+                    </button>
                     {/* Heartbeat Status */}
                     <div className="bg-slate-800 rounded-3xl p-6 text-slate-300 shadow-lg">
                         <h3 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-4 flex items-center gap-2">
@@ -448,6 +537,45 @@ const CheckPhoneApp: React.FC = () => {
     const [wsNewName, setWsNewName] = useState('');
     const [showMoveWsItem, setShowMoveWsItem] = useState<any | null>(null);
     const [wsMoveTargetPath, setWsMoveTargetPath] = useState('/');
+    const workspaceIndexRoot = apiConfig.nativeWorkspacePath?.trim() || '';
+    const workspaceAllowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+
+    const trackWorkspaceUpsert = async (path: string, reason: string) => {
+        if (!workspaceIndexRoot) return;
+        await FileIndex.trackFileUpsert({
+            indexRootPath: workspaceIndexRoot,
+            allowGlobal: workspaceAllowGlobal,
+            scope: 'workspace',
+            path,
+            actor: 'user',
+            reason,
+        }).catch(() => { });
+    };
+
+    const trackWorkspaceMove = async (fromPath: string, toPath: string, reason: string) => {
+        if (!workspaceIndexRoot) return;
+        await FileIndex.trackFileMove({
+            indexRootPath: workspaceIndexRoot,
+            allowGlobal: workspaceAllowGlobal,
+            scope: 'workspace',
+            fromPath,
+            toPath,
+            actor: 'user',
+            reason,
+        }).catch(() => { });
+    };
+
+    const trackWorkspaceDelete = async (path: string, reason: string) => {
+        if (!workspaceIndexRoot) return;
+        await FileIndex.trackFileDelete({
+            indexRootPath: workspaceIndexRoot,
+            allowGlobal: workspaceAllowGlobal,
+            scope: 'workspace',
+            path,
+            actor: 'user',
+            reason,
+        }).catch(() => { });
+    };
 
     // Load workspace files when panel opens
     const loadWsFiles = async () => {
@@ -472,6 +600,7 @@ const CheckPhoneApp: React.FC = () => {
             updatedAt: now,
         };
         await DB.saveWorkspaceFile(newFile);
+        await trackWorkspaceUpsert(`${wsCurrentPath}${newFile.name}`, 'workspace_create_item');
 
         // Sync to physical workspace if configured
         if (apiConfig.nativeWorkspacePath) {
@@ -494,11 +623,33 @@ const CheckPhoneApp: React.FC = () => {
 
     const handleDeleteWsFile = async (file: any) => {
         await DB.deleteWorkspaceFile(file.id);
+        await trackWorkspaceDelete(`${file.path}${file.name}`, 'workspace_delete_item');
+        if (typeof file?.name === 'string' && /^@agent_apps\/.+\.tsx$/i.test(file.name)) {
+            const appId = file.name.replace(/^@agent_apps\//i, '').replace(/\.tsx$/i, '');
+            if (appId) {
+                AppRegistry.permanentlyDeleteApp(appId, {
+                    reason: 'user_deleted_dynamic_app_file',
+                    deletedBy: 'user',
+                });
+                ActionDispatcher.unregisterApp(appId);
+                await FileIndex.trackFileDelete({
+                    indexRootPath: workspaceIndexRoot,
+                    allowGlobal: workspaceAllowGlobal,
+                    scope: 'dynamic_app',
+                    path: file.name,
+                    actor: 'user',
+                    reason: 'user_deleted_dynamic_app_file',
+                }).catch(() => { });
+            }
+        }
         // If it's a folder, also delete children from DB
         if (file.type === 'folder') {
             const childPath = wsCurrentPath + file.name + '/';
             const children = wsFiles.filter(f => f.path.startsWith(childPath));
-            for (const c of children) await DB.deleteWorkspaceFile(c.id);
+            for (const c of children) {
+                await DB.deleteWorkspaceFile(c.id);
+                await trackWorkspaceDelete(`${c.path}${c.name}`, 'workspace_delete_descendant');
+            }
         }
 
         // Delete physical file/folder
@@ -521,6 +672,7 @@ const CheckPhoneApp: React.FC = () => {
         if (!wsViewingFile) return;
         const updated = { ...wsViewingFile, content: wsEditContent, size: wsEditContent.length, updatedAt: Date.now() };
         await DB.saveWorkspaceFile(updated);
+        await trackWorkspaceUpsert(`${updated.path}${updated.name}`, 'workspace_save_file');
 
         // Sync to physical workspace if configured
         if (apiConfig.nativeWorkspacePath) {
@@ -558,6 +710,7 @@ const CheckPhoneApp: React.FC = () => {
         const timestampedNextRelativePath = `${wsMoveTargetPath.substring(1)}${item.name}-${Date.now()}`;
         let finalName = item.name;
         let finalPath = wsMoveTargetPath;
+        const oldFullPath = `${item.path}${item.name}`;
 
         if (apiConfig.nativeWorkspacePath) {
             try {
@@ -571,12 +724,18 @@ const CheckPhoneApp: React.FC = () => {
         }
 
         await DB.saveWorkspaceFile({ ...item, name: finalName, path: finalPath, updatedAt: Date.now() });
+        await trackWorkspaceMove(oldFullPath, `${finalPath}${finalName}`, 'workspace_move_item');
         if (item.type === 'folder') {
             const oldPrefix = `${item.path}${item.name}/`;
             const newPrefix = `${finalPath}${finalName}/`;
             const descendants = wsFiles.filter(f => f.path.startsWith(oldPrefix));
             for (const child of descendants) {
                 await DB.saveWorkspaceFile({ ...child, path: child.path.replace(oldPrefix, newPrefix), updatedAt: Date.now() });
+                await trackWorkspaceMove(
+                    `${child.path}${child.name}`,
+                    `${child.path.replace(oldPrefix, newPrefix)}${child.name}`,
+                    'workspace_move_descendant',
+                );
             }
         }
 
@@ -866,6 +1025,360 @@ const CheckPhoneApp: React.FC = () => {
         </div>
     );
 
+    // ─── Memory Review Panel (L3b Proposal Approval) ───
+    const [reviewTab, setReviewTab] = useState<'pending' | 'approved' | 'rejected'>('pending');
+    const [editingProposal, setEditingProposal] = useState<CoreProposal | null>(null);
+    const [editText, setEditText] = useState('');
+    const workspaceRoot = apiConfig.nativeWorkspacePath?.trim() || '';
+    const wsAllowGlobal = !!apiConfig.securityPolicy?.allowGlobalFileAccess;
+
+    const handleBackfillL2 = useCallback(async () => {
+        if (!agent || !workspaceRoot || isBackfilling) return;
+        setIsBackfilling(true);
+        try {
+            const messages = await DB.getMessagesByCharId(agent.id);
+            const result = await backfillL2FromDB({ rootPath: workspaceRoot, allowGlobal: wsAllowGlobal, charId: agent.id, messages });
+            addToast(result.sessionsCreated > 0
+                ? `已补录 ${result.sessionsCreated} 个 session（${result.daysProcessed} 天）`
+                : '无需补录，历史记录已是最新', 'success');
+        } catch {
+            addToast('补录失败，请检查工作区配置', 'error');
+        } finally {
+            setIsBackfilling(false);
+        }
+    }, [agent, workspaceRoot, wsAllowGlobal, isBackfilling, addToast]);
+
+    const proposals: CoreProposal[] = agent?.coreProposals || [];
+    const pendingCount = proposals.filter(p => p.status === 'pending').length;
+
+    const updateProposal = useCallback((id: string, updates: Partial<CoreProposal>) => {
+        if (!agent) return;
+        const next = (agent.coreProposals || []).map(p =>
+            p.id === id ? { ...p, ...updates } : p,
+        );
+        updateCharacter(agent.id, { coreProposals: next });
+    }, [agent, updateCharacter]);
+
+    const deleteProposal = useCallback((id: string) => {
+        if (!agent) return;
+        updateCharacter(agent.id, { coreProposals: (agent.coreProposals || []).filter(p => p.id !== id) });
+    }, [agent, updateCharacter]);
+
+    /** Write an approved proposal back to workspace profile files in a structured section format */
+    const writeProposalToWorkspace = useCallback(async (proposal: CoreProposal) => {
+        if (!workspaceRoot) return;
+        const fileMap: Record<CoreProposalCategory, string> = {
+            user_profile: 'USER.md',
+            about_agent: 'Agent_Soul.md',
+            relationship_core: 'MEMORY.md',
+        };
+        const sectionMap: Record<CoreProposalCategory, string> = {
+            user_profile: '## 用户画像更新 (L3b)',
+            about_agent: '## Agent 特质更新 (L3b)',
+            relationship_core: '## 关系核心更新 (L3b)',
+        };
+        const targetFile = fileMap[proposal.category];
+        const sectionHeader = sectionMap[proposal.category];
+        try {
+            let existing = '';
+            try {
+                existing = await fsBridge.readFile(workspaceRoot, targetFile, wsAllowGlobal);
+            } catch { /* file may not exist yet */ }
+
+            // Deduplicate: skip if this proposal text is already present
+            if (existing.includes(proposal.proposal.substring(0, 40))) return;
+
+            const timestamp = new Date().toISOString().slice(0, 10);
+            const entry = `- **[${timestamp}]** ${proposal.proposal}`;
+
+            // If section already exists, append the entry under it; otherwise append the section
+            if (existing.includes(sectionHeader)) {
+                // Insert the entry after the section header line
+                const updated = existing.replace(
+                    new RegExp(`(${sectionHeader.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\n]*\n)`),
+                    `$1${entry}\n`,
+                );
+                await fsBridge.writeFile(workspaceRoot, targetFile, updated, wsAllowGlobal);
+            } else {
+                const block = `\n\n${sectionHeader}\n${entry}\n`;
+                await fsBridge.writeFile(workspaceRoot, targetFile, existing + block, wsAllowGlobal);
+            }
+        } catch (e) {
+            console.warn(`writeProposalToWorkspace: could not write to ${targetFile}`, e);
+        }
+    }, [workspaceRoot, wsAllowGlobal]);
+
+    const handleApprove = useCallback(async (id: string) => {
+        const proposal = proposals.find(p => p.id === id);
+        if (!proposal) return;
+        updateProposal(id, { status: 'approved' });
+
+        // ── L4 profiles buffer ──────────────────────────────────────────────
+        // Always record to profiles/ first.  Only write to stable core files
+        // (USER.md / Agent_Soul.md) once the observation is confirmed enough.
+        let promoted = false;
+        if (workspaceRoot) {
+            try {
+                ({ promoted } = await recordProfileApproval(
+                    workspaceRoot, wsAllowGlobal, { ...proposal, status: 'approved' },
+                ));
+            } catch { /* profiles write failure is non-blocking */ }
+        }
+
+        if (promoted) {
+            await writeProposalToWorkspace({ ...proposal, status: 'approved' });
+        }
+
+        if (workspaceRoot && agent) {
+            buildProfilesBlurb(workspaceRoot, wsAllowGlobal)
+                .then(pb => updateCharacter(agent.id, { profilesBlurb: pb }))
+                .catch(() => { });
+        }
+
+        await writeProposalAudit(workspaceRoot, wsAllowGlobal, {
+            proposalId: proposal.id, action: 'approved',
+            category: proposal.category, proposalText: proposal.proposal, reason: proposal.reason,
+        }).catch(() => { });
+
+        addToast(
+            promoted ? '观察已稳定，升级写入长期记忆 ✓' : '观察已记录，再次确认后将写入长期记忆',
+            'success',
+        );
+    }, [proposals, updateProposal, writeProposalToWorkspace, workspaceRoot, wsAllowGlobal, addToast]);
+
+    const handleReject = useCallback(async (id: string) => {
+        const proposal = proposals.find(p => p.id === id);
+        if (!proposal) return;
+        updateProposal(id, { status: 'rejected' });
+        await writeProposalAudit(workspaceRoot, wsAllowGlobal, {
+            proposalId: proposal.id, action: 'rejected',
+            category: proposal.category, proposalText: proposal.proposal, reason: proposal.reason,
+        }).catch(() => { });
+        addToast('提案已拒绝', 'info');
+    }, [proposals, updateProposal, workspaceRoot, wsAllowGlobal, addToast]);
+
+    const handleRevertToPending = useCallback(async (id: string) => {
+        const proposal = proposals.find(p => p.id === id);
+        if (!proposal) return;
+        updateProposal(id, { status: 'pending' });
+        await writeProposalAudit(workspaceRoot, wsAllowGlobal, {
+            proposalId: proposal.id, action: 'reverted',
+            category: proposal.category, proposalText: proposal.proposal, reason: proposal.reason,
+        }).catch(() => { });
+        addToast('已退回待审', 'info');
+    }, [proposals, updateProposal, workspaceRoot, wsAllowGlobal, addToast]);
+
+    const handleEditApprove = useCallback(async () => {
+        if (!editingProposal) return;
+        const updated = { ...editingProposal, proposal: editText, status: 'approved' as const };
+        updateProposal(editingProposal.id, { proposal: editText, status: 'approved' });
+
+        let promoted = false;
+        if (workspaceRoot) {
+            try {
+                ({ promoted } = await recordProfileApproval(workspaceRoot, wsAllowGlobal, updated));
+            } catch { /* non-blocking */ }
+        }
+
+        if (promoted) {
+            await writeProposalToWorkspace(updated);
+        }
+
+        if (workspaceRoot && agent) {
+            buildProfilesBlurb(workspaceRoot, wsAllowGlobal)
+                .then(pb => updateCharacter(agent.id, { profilesBlurb: pb }))
+                .catch(() => { });
+        }
+
+        await writeProposalAudit(workspaceRoot, wsAllowGlobal, {
+            proposalId: editingProposal.id, action: 'edited',
+            category: editingProposal.category, proposalText: editText, reason: editingProposal.reason,
+        }).catch(() => { });
+        setEditingProposal(null);
+        addToast(
+            promoted ? '编辑后已稳定，升级写入长期记忆 ✓' : '编辑已记录，再次确认后将写入长期记忆',
+            'success',
+        );
+    }, [editingProposal, editText, updateProposal, writeProposalToWorkspace, workspaceRoot, wsAllowGlobal, addToast]);
+
+    const CATEGORY_LABEL: Record<CoreProposalCategory, { label: string; color: string; bg: string }> = {
+        user_profile: { label: '用户画像', color: 'text-blue-600', bg: 'bg-blue-50' },
+        about_agent: { label: 'Agent 特质', color: 'text-purple-600', bg: 'bg-purple-50' },
+        relationship_core: { label: '关系核心', color: 'text-rose-600', bg: 'bg-rose-50' },
+    };
+
+    const renderMemoryReview = () => {
+        const tabProposals = proposals.filter(p => p.status === reviewTab);
+
+        return (
+            <div className="absolute inset-0 flex flex-col bg-[#f8fafc] z-10">
+                <PanelHeader title="记忆审阅中心" />
+
+                {/* Tab bar */}
+                <div className="flex gap-1 px-4 py-3 bg-white border-b border-slate-100 shrink-0">
+                    {(['pending', 'approved', 'rejected'] as const).map(tab => {
+                        const count = proposals.filter(p => p.status === tab).length;
+                        const isActive = reviewTab === tab;
+                        const colors = tab === 'pending'
+                            ? 'bg-amber-500 text-white'
+                            : tab === 'approved'
+                                ? 'bg-emerald-500 text-white'
+                                : 'bg-slate-400 text-white';
+                        const inactive = 'bg-slate-100 text-slate-500';
+                        return (
+                            <button
+                                key={tab}
+                                onClick={() => setReviewTab(tab)}
+                                className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${isActive ? colors : inactive}`}
+                            >
+                                {tab === 'pending' ? '待审' : tab === 'approved' ? '已通过' : '已拒绝'}
+                                {count > 0 && (
+                                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono ${isActive ? 'bg-white/25' : 'bg-slate-200 text-slate-400'}`}>
+                                        {count}
+                                    </span>
+                                )}
+                            </button>
+                        );
+                    })}
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-4 space-y-3 no-scrollbar pb-24 overscroll-contain">
+                    {tabProposals.length === 0 && (
+                        <div className="flex flex-col items-center justify-center py-16 text-center">
+                            <div className="text-4xl mb-3 opacity-30">
+                                {reviewTab === 'pending' ? '🔮' : reviewTab === 'approved' ? '✅' : '🗑️'}
+                            </div>
+                            <p className="text-sm text-slate-400">
+                                {reviewTab === 'pending' ? '暂无待审提案' : reviewTab === 'approved' ? '暂无已通过提案' : '暂无已拒绝提案'}
+                            </p>
+                            {reviewTab === 'pending' && (
+                                <p className="text-xs text-slate-300 mt-2 max-w-[200px]">每日总结生成后，AI 提取的候选记忆会在此等待你的审批</p>
+                            )}
+                        </div>
+                    )}
+
+                    {tabProposals.map(proposal => {
+                        const meta = CATEGORY_LABEL[proposal.category] ?? { label: proposal.category, color: 'text-slate-600', bg: 'bg-slate-50' };
+                        return (
+                            <div key={proposal.id} className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+                                {/* Card header */}
+                                <div className="px-4 pt-4 pb-2 flex items-center justify-between">
+                                    <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-lg ${meta.bg} ${meta.color}`}>
+                                        {meta.label}
+                                    </span>
+                                    <span className="text-[10px] text-slate-400 font-mono">
+                                        {new Date(proposal.createdAt).toLocaleDateString()}
+                                    </span>
+                                </div>
+
+                                {/* Proposal text */}
+                                <div className="px-4 pb-3">
+                                    <p className="text-sm text-slate-800 leading-relaxed">{proposal.proposal}</p>
+                                    {proposal.reason && (
+                                        <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+                                            <span className="font-medium text-slate-500">提炼原因：</span>
+                                            {proposal.reason}
+                                        </p>
+                                    )}
+                                </div>
+
+                                {/* Actions */}
+                                <div className="px-3 pb-3 flex gap-2 border-t border-slate-50 pt-3">
+                                    {reviewTab === 'pending' && (
+                                        <>
+                                            <button
+                                                onClick={() => handleApprove(proposal.id)}
+                                                className="flex-1 py-2 bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-sm shadow-emerald-100 active:scale-95 transition-all"
+                                            >
+                                                通过 ✓
+                                            </button>
+                                            <button
+                                                onClick={() => { setEditingProposal(proposal); setEditText(proposal.proposal); }}
+                                                className="flex-1 py-2 bg-blue-50 text-blue-600 text-xs font-bold rounded-xl active:scale-95 transition-all border border-blue-100"
+                                            >
+                                                编辑后通过
+                                            </button>
+                                            <button
+                                                onClick={() => handleReject(proposal.id)}
+                                                className="w-10 py-2 bg-slate-100 text-slate-400 text-xs font-bold rounded-xl active:scale-95 transition-all flex items-center justify-center"
+                                            >
+                                                ✕
+                                            </button>
+                                        </>
+                                    )}
+                                    {reviewTab === 'approved' && (
+                                        <>
+                                            <button
+                                                onClick={() => handleRevertToPending(proposal.id)}
+                                                className="flex-1 py-2 bg-amber-50 text-amber-600 text-xs font-bold rounded-xl border border-amber-100 active:scale-95 transition-all"
+                                            >
+                                                退回待审
+                                            </button>
+                                            <button
+                                                onClick={() => deleteProposal(proposal.id)}
+                                                className="w-10 py-2 bg-slate-100 text-slate-400 text-xs font-bold rounded-xl active:scale-95 transition-all flex items-center justify-center"
+                                            >
+                                                🗑
+                                            </button>
+                                        </>
+                                    )}
+                                    {reviewTab === 'rejected' && (
+                                        <>
+                                            <button
+                                                onClick={() => handleRevertToPending(proposal.id)}
+                                                className="flex-1 py-2 bg-amber-50 text-amber-600 text-xs font-bold rounded-xl border border-amber-100 active:scale-95 transition-all"
+                                            >
+                                                重新待审
+                                            </button>
+                                            <button
+                                                onClick={() => deleteProposal(proposal.id)}
+                                                className="w-10 py-2 bg-red-50 text-red-400 text-xs font-bold rounded-xl active:scale-95 transition-all flex items-center justify-center"
+                                            >
+                                                🗑
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+
+                {/* Edit modal */}
+                <Modal
+                    isOpen={!!editingProposal}
+                    title="编辑提案内容"
+                    onClose={() => setEditingProposal(null)}
+                    footer={
+                        <div className="flex gap-2 w-full">
+                            <button onClick={() => setEditingProposal(null)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl">取消</button>
+                            <button onClick={handleEditApprove} className="flex-1 py-3 bg-emerald-500 text-white font-bold rounded-2xl shadow-md shadow-emerald-100">通过并写入</button>
+                        </div>
+                    }
+                >
+                    <div className="space-y-3">
+                        {editingProposal && (
+                            <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded-lg inline-block ${CATEGORY_LABEL[editingProposal.category]?.bg} ${CATEGORY_LABEL[editingProposal.category]?.color}`}>
+                                {CATEGORY_LABEL[editingProposal.category]?.label}
+                            </span>
+                        )}
+                        <textarea
+                            value={editText}
+                            onChange={e => setEditText(e.target.value)}
+                            className="w-full h-32 bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-200"
+                            placeholder="编辑提案内容..."
+                        />
+                        {editingProposal?.reason && (
+                            <p className="text-xs text-slate-400 leading-relaxed">
+                                <span className="font-medium">提炼原因：</span>{editingProposal.reason}
+                            </p>
+                        )}
+                    </div>
+                </Modal>
+            </div>
+        );
+    };
+
     // Methods for impression logic
     const handleGenerateImpression = async (type: 'initial' | 'update') => {
         if (!agent || !apiConfig.apiKey) { addToast('请先配置 API Key', 'error'); return; }
@@ -883,6 +1396,145 @@ const CheckPhoneApp: React.FC = () => {
             const newRefined = { ...agent.refinedMemories, [`${year}-${month}`]: "示例精炼记忆" };
             updateCharacter(agent.id, { refinedMemories: newRefined });
         } catch (err: any) { addToast(err.message, 'error'); }
+    };
+
+    // ─── App Manager Panel ───
+    const renderAppManager = () => {
+        if (appMgrApps.length === 0 && appMgrTombstones.length === 0 && activePanel === 'app_manager') {
+            refreshAppMgr();
+        }
+        const active = appMgrApps.filter(a => a.status === 'active');
+        const trashed = appMgrApps.filter(a => a.status === 'trashed');
+        return (
+            <div className="absolute inset-0 flex flex-col bg-[#f8fafc] z-10">
+                <PanelHeader title="应用管理" />
+                <div className="flex-1 overflow-y-auto p-4 space-y-5 no-scrollbar pb-24 overscroll-contain">
+                    {/* Active dynamic apps */}
+                    <div>
+                        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                            <span className="w-2 h-2 bg-green-400 rounded-full"></span>活跃应用
+                            <span className="text-slate-300 normal-case font-normal">({active.length})</span>
+                        </h3>
+                        {active.length === 0 ? (
+                            <p className="text-sm text-slate-300 italic text-center py-4">暂无 Agent 动态应用</p>
+                        ) : (
+                            <div className="space-y-2">
+                                {active.map(app => (
+                                    <div key={app.appId} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-4 flex items-start justify-between gap-3">
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-sm font-bold text-slate-800 truncate">{app.appId}</p>
+                                            <p className="text-xs text-slate-400 mt-0.5 truncate">{app.description}</p>
+                                            <div className="flex flex-wrap gap-1 mt-2">
+                                                {app.capabilities.slice(0, 4).map(c => (
+                                                    <span key={c} className="text-[10px] px-1.5 py-0.5 bg-slate-100 text-slate-500 rounded">{c}</span>
+                                                ))}
+                                                {app.capabilities.length > 4 && (
+                                                    <span className="text-[10px] px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded">+{app.capabilities.length - 4}</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <button
+                                            onClick={() => handleTrashApp(app.appId)}
+                                            className="text-xs text-amber-600 bg-amber-50 px-3 py-1.5 rounded-xl font-bold shrink-0 active:scale-95 transition-transform"
+                                        >
+                                            移入垃圾箱
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Trashed apps */}
+                    <div>
+                        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                            <span className="w-2 h-2 bg-amber-400 rounded-full"></span>垃圾箱
+                            <span className="text-slate-300 normal-case font-normal">({trashed.length})</span>
+                        </h3>
+                        {trashed.length === 0 ? (
+                            <p className="text-sm text-slate-300 italic text-center py-4">垃圾箱为空</p>
+                        ) : (
+                            <div className="space-y-2">
+                                {trashed.map(app => (
+                                    <div key={app.appId} className="bg-white rounded-2xl border border-amber-100 shadow-sm p-4">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm font-bold text-slate-600 truncate">{app.appId}</p>
+                                                <p className="text-xs text-slate-400 mt-0.5 truncate">{app.description}</p>
+                                                {app.trashReason && <p className="text-[10px] text-amber-500 mt-1">原因: {app.trashReason}</p>}
+                                                <p className="text-[10px] text-slate-300 mt-1">
+                                                    移入: {app.trashedAt ? new Date(app.trashedAt).toLocaleDateString('zh-CN') : '未知'} · 由 {app.trashedBy === 'agent' ? 'Agent' : app.trashedBy === 'user' ? '用户' : '系统'}
+                                                </p>
+                                            </div>
+                                            <div className="flex flex-col gap-1.5 shrink-0">
+                                                <button
+                                                    onClick={() => handleRestoreApp(app.appId)}
+                                                    className="text-xs text-green-600 bg-green-50 px-3 py-1.5 rounded-xl font-bold active:scale-95 transition-transform"
+                                                >
+                                                    恢复
+                                                </button>
+                                                <button
+                                                    onClick={() => setConfirmPermDelete(app.appId)}
+                                                    className="text-xs text-red-500 bg-red-50 px-3 py-1.5 rounded-xl font-bold active:scale-95 transition-transform"
+                                                >
+                                                    彻底删除
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Tombstones — read-only */}
+                    {appMgrTombstones.length > 0 && (
+                        <div>
+                            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                <span className="w-2 h-2 bg-slate-300 rounded-full"></span>已永久删除
+                                <span className="text-slate-300 normal-case font-normal">({appMgrTombstones.length})</span>
+                            </h3>
+                            <div className="space-y-2">
+                                {appMgrTombstones.map(t => (
+                                    <div key={t.appId} className="bg-slate-50 rounded-2xl border border-slate-100 p-4 opacity-60">
+                                        <p className="text-sm font-bold text-slate-500 truncate line-through">{t.appId}</p>
+                                        <p className="text-xs text-slate-400 mt-0.5 truncate">{t.description}</p>
+                                        <p className="text-[10px] text-slate-300 mt-1">
+                                            删除于 {new Date(t.deletedAt).toLocaleDateString('zh-CN')} · 由 {t.deletedBy === 'agent' ? 'Agent' : t.deletedBy === 'user' ? '用户' : '系统'}
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    <p className="text-[10px] text-slate-300 text-center">Agent 创建的应用会自动注册到此列表</p>
+                </div>
+
+                {/* Confirm permanent delete */}
+                <Modal
+                    isOpen={!!confirmPermDelete}
+                    title="⚠️ 彻底删除"
+                    onClose={() => setConfirmPermDelete(null)}
+                    footer={
+                        <>
+                            <button onClick={() => setConfirmPermDelete(null)} className="flex-1 py-3 bg-slate-100 rounded-2xl text-sm font-bold text-slate-600">取消</button>
+                            <button
+                                onClick={() => confirmPermDelete && handlePermDeleteApp(confirmPermDelete)}
+                                className="flex-1 py-3 bg-red-500 text-white rounded-2xl text-sm font-bold"
+                            >
+                                确认彻底删除
+                            </button>
+                        </>
+                    }
+                >
+                    <p className="text-sm text-slate-600 text-center py-2">
+                        确定要彻底删除 <strong>{confirmPermDelete}</strong> 吗？<br />
+                        <span className="text-xs text-slate-400">此操作不可撤销，应用文件将永久删除。</span>
+                    </p>
+                </Modal>
+            </div>
+        );
     };
 
     // ─── Grid Desktop View (SULLYTEST2-style) ───
@@ -903,6 +1555,27 @@ const CheckPhoneApp: React.FC = () => {
                         <AppIcon icon="⚡" color="linear-gradient(135deg, #ec4899, #db2777)" label="技能中心" onClick={() => setActivePanel('skills')} />
                         <AppIcon icon="🔒" color="linear-gradient(135deg, #14b8a6, #0d9488)" label="安全权限" onClick={() => setActivePanel('permissions')} />
                         <AppIcon icon="⏰" color="linear-gradient(135deg, #3b82f6, #2563eb)" label="后台调度" onClick={() => setActivePanel('cron')} />
+                        <AppIcon icon="🧩" color="linear-gradient(135deg, #a855f7, #7c3aed)" label="应用管理" onClick={() => { refreshAppMgr(); setActivePanel('app_manager'); }} />
+
+                        {/* Memory Review — with pending badge */}
+                        <div className="flex flex-col items-center gap-1.5 relative">
+                            <button
+                                onClick={() => setActivePanel('review')}
+                                className="w-[3.8rem] h-[3.8rem] rounded-[1.2rem] flex items-center justify-center text-2xl shadow-lg border border-white/10 active:scale-95 transition-transform relative"
+                                style={{ background: 'linear-gradient(135deg, #f97316, #ea580c)' }}
+                            >
+                                <div className="absolute inset-0 rounded-[1.2rem] overflow-hidden">
+                                    <div className="absolute inset-0 bg-gradient-to-tr from-black/10 to-transparent"></div>
+                                </div>
+                                <div className="relative z-10 drop-shadow-md">🔮</div>
+                                {pendingCount > 0 && (
+                                    <div className="absolute -top-1 -right-1 min-w-[1.15rem] h-[1.15rem] px-1 bg-red-500 rounded-full ring-2 ring-white flex items-center justify-center z-30 shadow-[0_2px_6px_rgba(0,0,0,0.25)]">
+                                        <span className="text-[8px] font-bold leading-none text-white">{pendingCount > 9 ? '9+' : pendingCount}</span>
+                                    </div>
+                                )}
+                            </button>
+                            <span className="text-[10px] font-medium text-white/90 drop-shadow-md tracking-wide px-1 py-0.5 rounded bg-black/10 backdrop-blur-[2px]">记忆审阅</span>
+                        </div>
 
                         {/* Disconnect Button (SULLYTEST2 style) */}
                         <div className="flex flex-col items-center gap-1.5">
@@ -924,7 +1597,10 @@ const CheckPhoneApp: React.FC = () => {
                     <div className="bg-white/20 backdrop-blur-xl rounded-[2rem] p-3 flex justify-around items-center border border-white/10 shadow-lg">
                         <button onClick={() => setActivePanel('dashboard')} className="p-2 rounded-xl active:bg-white/20 transition-colors"><div className="w-10 h-10 bg-green-500 rounded-xl flex items-center justify-center text-xl shadow-sm">📊</div></button>
                         <button onClick={() => setActivePanel('memories')} className="p-2 rounded-xl active:bg-white/20 transition-colors"><div className="w-10 h-10 bg-purple-500 rounded-xl flex items-center justify-center text-xl shadow-sm">🧠</div></button>
-                        <button onClick={() => setActivePanel('cron')} className="p-2 rounded-xl active:bg-white/20 transition-colors"><div className="w-10 h-10 bg-blue-500 rounded-xl flex items-center justify-center text-xl shadow-sm">⏰</div></button>
+                        <button onClick={() => setActivePanel('review')} className="p-2 rounded-xl active:bg-white/20 transition-colors relative">
+                            <div className="w-10 h-10 bg-orange-500 rounded-xl flex items-center justify-center text-xl shadow-sm">🔮</div>
+                            {pendingCount > 0 && <div className="absolute -top-0.5 -right-0.5 min-w-[1rem] h-[1rem] px-0.5 bg-red-500 rounded-full ring-2 ring-white/90 flex items-center justify-center z-20 shadow-sm"><span className="text-[7px] font-bold leading-none text-white">{pendingCount > 9 ? '9+' : pendingCount}</span></div>}
+                        </button>
                         <button onClick={() => setActivePanel('impression')} className="p-2 rounded-xl active:bg-white/20 transition-colors"><div className="w-10 h-10 bg-indigo-500 rounded-xl flex items-center justify-center text-xl shadow-sm">👁️</div></button>
                     </div>
                 </div>
@@ -941,6 +1617,8 @@ const CheckPhoneApp: React.FC = () => {
             {activePanel === 'skills' && renderSkills()}
             {activePanel === 'permissions' && renderPermissions()}
             {activePanel === 'cron' && renderCronPanel()}
+            {activePanel === 'app_manager' && renderAppManager()}
+            {activePanel === 'review' && renderMemoryReview()}
             {activePanel === 'memories' && (
                 <div className="absolute inset-0 flex flex-col bg-[#f8fafc] z-10">
                     <PanelHeader title="记忆档案" />
