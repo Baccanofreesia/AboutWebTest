@@ -866,7 +866,7 @@ const Chat: React.FC = () => {
         } else {
             await DB.clearMessages(char.id);
             setMessages([]);
-            addToast('宸叉竻绌?(鍖呭惈瑙侀潰璁板綍)', 'success');
+            addToast('已清空', 'success');
         }
         setModalType('none');
     };
